@@ -45,6 +45,45 @@ export function renderMarkdown(input: string): string {
 }
 
 /**
+ * 段首字面空白的最小化归一。小说原文的段首常自带全角空格「　　」；
+ * 阅读视图又用 CSS `text-indent: 2em` 统一缩进 —— 两套机制叠加会让
+ * 段落（尤其首字下沉时被归零缩进的那段之后的正文）多缩进两个字符。
+ * 这里把段首的字面空格 / 制表符剥掉，让缩进只由 CSS 负责。
+ *
+ * 只剥「段落行」：以 Markdown 结构标记开头的行（列表 / 引用 / 表格 /
+ * 标题 / 分割线）保留原样，避免破坏结构；围栏代码块内部也不动。
+ * 纯文本一律剥全角 + 空格 + 制表符；Markdown 文档只剥全角空格
+ * （半角缩进可能是 4 空格触发的代码块，不能烧）。 */
+const FENCE_LINE_RE = /^[ \t]{0,3}(```+|~~~+)/;
+const STRUCTURAL_LINE_RE =
+  /^(#{1,6}\s|>\s?|```|~~~|[-+*]\s|\d+[.)]\s|\|.*\|\s*$|([-*_](\s*[-*_]){2,}|={3,}|-{3,})\s*$)/;
+
+/**
+ * 预处理器：把 reading 渲染原始文本里每行的段首字面空白按需剥掉。
+ * 返回处理后的整段文本；结构行与围栏内部原样保留。
+ */
+function normalizeParagraphIndents(input: string, stripAscii: boolean): string {
+  const chunk = stripAscii ? "[ \t\u3000]+" : "\u3000+";
+  const leadingRe = new RegExp(`^(${chunk})`);
+  let inFence = false;
+  return input
+    .split("\n")
+    .map((line) => {
+      if (FENCE_LINE_RE.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence) return line;
+      const m = leadingRe.exec(line);
+      if (!m) return line;
+      const body = line.slice(m[0].length);
+      if (STRUCTURAL_LINE_RE.test(body.trimStart())) return line;
+      return body;
+    })
+    .join("\n");
+}
+
+/**
  * 纯文本章节标题行的预览渲染：整行命中（第一章 / 楔子 / 1、…）时，在预览层
  * 提升为真正的 Markdown 标题，让章节标题本身不再参与「行首缩进」，其下正文
  * 自动独立成段、各自首行缩进两格；同时内容上色会按标题上下文给标题上色。
@@ -57,10 +96,10 @@ export function renderMarkdown(input: string): string {
  */
 export function renderForReading(input: string): string {
   if (/^\s{0,3}#{1,6}\s+/m.test(input) || /^\s*(=|-){3,}\s*$/m.test(input)) {
-    return renderMarkdown(input);
+    return renderMarkdown(normalizeParagraphIndents(input, false));
   }
   return renderMarkdown(
-    input
+    normalizeParagraphIndents(input, true)
       .split("\n")
       .map((line) => {
         const trimmed = line.trim();

@@ -50,4 +50,39 @@ describe("renderForReading", () => {
     /* 已是 Markdown 文档：按原样解析，「第二章」保持普通段落。 */
     expect(html).toContain("<p>第二章 落雨</p>");
   });
+
+  it("剥掉段落行首的字面缩进，缩进交给 CSS 统一排版", () => {
+    /* 原文段首的两个全角空格是字面空白：随 marked 原样进 <p>，再叠 CSS
+       text-indent 会双重缩进（首字下沉让首段归零后，第二段多缩两字符）。
+       阅读视图应剥掉字面缩进，输出干净的 <p>正文…</p>。 */
+    const html = renderForReading("第一章 起风\n\n　　正文一段。\n\n　　正文二段。\n");
+    expect(html).toContain("<p>正文一段。</p>");
+    expect(html).toContain("<p>正文二段。</p>");
+    expect(html).not.toMatch(/<p>\s*　/);
+  });
+
+  it("Markdown 文档同样剥全角段首缩进，但不剥半角（可能是代码块缩进）", () => {
+    const html = renderForReading("# 序\n\n　　正文一段。\n\n  正文二段。\n");
+    expect(html).toContain("<p>正文一段。</p>");
+    /* 半角两个空格：在 Markdown 里只是普通段落的弱缩进，保留不动。 */
+    expect(html).toContain("<p>  正文二段。</p>");
+  });
+
+  it("围栏代码块内部的原样空白保留，不做段首剥离", () => {
+    const html = renderForReading("第一章 起风\n\n```js\n  const a = 1;\n　　const b = 2;\n```\n\n　　正文。\n");
+    expect(html).toContain("<pre><code");
+    /* 围栏内的全角空白原样保留（highlight 只包语法 span，不吞空白；
+       本文档经剥离后唯一还带「　　」的位置就是围栏内部）。 */
+    expect(html).toContain("　　");
+    /* 段落行的字面缩进被剥掉。 */
+    expect(html).not.toContain("<p>　　正文。</p>");
+  });
+
+  it("以结构标记开头的行保留原样，不因段首剥离而变形", () => {
+    const html = renderForReading("# 序\n\n　　> 引用行。\n\n　　  - 列表项。\n");
+    /* U+3000 前缀不在 marked 允许的结构缩进内，整行本就被当作普通段落字面输出；
+       剥离逻辑不得把「结构标记前缀」当成段落去压平、更不能削掉字面空白。 */
+    expect(html).toContain("　　&gt; 引用行。");
+    expect(html).toContain("　　  - 列表项。");
+  });
 });

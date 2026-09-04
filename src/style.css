@@ -461,12 +461,28 @@ select {
   text-indent: 0;
 }
 
+/* 下沉区需要两行纵深：即使首段文字只够一行（如短开篇「他推开门。」），
+   也要为下沉字兜住这两行，否则下沉区会向下越界、把紧随其后的段落整行
+   向右顶开 —— 视觉上就是「第二段多缩进几个字」。
+   min-height 用 p 自身的 em（随字号缩放），取 2 × 1.8em：正文行高固定
+   1.7（见上方 p 规则），留一点余量兜住行高 1.8 以内的下沉盒。 */
+.markdown-body.reading-view.drop-cap > p:first-of-type,
+.markdown-body.reading-view.drop-cap > h1 + p,
+.markdown-body.reading-view.drop-cap > h2 + p {
+  min-height: calc(2 * 1.8em);
+}
+
+/* 用 initial-letter 替代 float 下沉：浏览器按规范把首字排进前两行，
+   其下沉箱被约束在段落内部、绝不侵入后续段落（float 版靠字形盒的
+   度量，首段越短越容易越界右推下一段，见上方 min-height 说明）。
+   仅 WebView2/Chromium 目标，initial-letter 直接可用；不支持的环境
+   退回为较大的行首大字，不会出现右推缩进的排版缺陷。 */
 .markdown-body.reading-view.drop-cap > p:first-of-type::first-letter,
 .markdown-body.reading-view.drop-cap > h1 + p::first-letter,
 .markdown-body.reading-view.drop-cap > h2 + p::first-letter {
   font-size: 2.8em;
-  float: left;
-  line-height: 1;
+  line-height: normal;
+  initial-letter: 2;
   margin-right: 0.12em;
   font-weight: bold;
   color: var(--primary);
