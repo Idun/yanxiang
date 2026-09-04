@@ -65,6 +65,8 @@ id_ed25519
 *serviceAccount*.json
 *firebase*.json
 *token*
+# 例外：tokenStore 是业务源码，不能因上方通配规则被忽略
+!src/tokenStore.ts
 # 私有云厂商 CLI 凭据目录
 .aws/
 .gcp/
