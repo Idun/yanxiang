@@ -1,0 +1,127 @@
+# ---------- Dependencies ----------
+node_modules/
+.jvprc
+# 包管理器配置文件可能包含 registry 认证 token
+.npmrc
+.yarnrc
+.pnpmrc
+
+# ---------- Build output ----------
+dist/
+dist-ssr/
+build/
+coverage/
+*.local
+.vite/
+*.tsbuildinfo
+.eslintcache
+.cache/vite*
+
+# ---------- Tauri / Rust ----------
+src-tauri/target/
+src-tauri/gen/
+src-tauri/gen/schemas/
+src-tauri/gen/android/
+src-tauri/gen/apple/
+src-tauri/.vite/
+*.rs.bk
+
+# ---------- Sensitive / Env Config ----------
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+# 证书 / 私钥 / 密钥文件
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.p8
+*.crt
+*.cer
+*.crl
+*.p7b
+*.p7c
+*.spc
+*.ppk
+# SSH 私钥
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+# 明文凭据文件 / 服务账号
+.credentials
+.credentials.json
+.netrc
+.git-credentials
+.pypirc
+.m2/
+*.secret
+*secret*.json
+*credential*.json
+*serviceAccount*.json
+*firebase*.json
+*token*
+# 私有云厂商 CLI 凭据目录
+.aws/
+.gcp/
+.gcloud/
+.azure/
+
+# ---------- User Data / Privacy ----------
+# 备份 / 导出（含写作内容与设置）
+*.json.bak
+backup*.json
+yanxiang_backup*.json
+yanxiang_chat_records*.json
+yanxiang_vector_*.json
+精修文稿_*.md
+*.bak
+*.old
+*.dump
+*.sql
+*.sql.gz
+# 本地数据库
+data/*.db
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+# 根目录个人写作素材 / 数据（生成内置素材、故事/叙事选项所用的源文件与草稿）
+/output.txt
+/input.txt
+/写作素材.md
+/素材*.md
+/drafts/
+/notes/
+/写作/
+/数据/
+/output/
+
+# ---------- Logs ----------
+*.log
+logs/
+
+# ---------- Reference / Demo files (不必提交到仓库) ----------
+/code.html
+/max_demo.html
+
+# ---------- OS & Editor ----------
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- Misc ----------
+.cache/
+.temp/
+tmp/
