@@ -10,6 +10,7 @@ import {
   applyKnowledgeAutoLoad,
   applyProvider,
   applyTheme,
+  clampAutoSaveMinutes,
   clampEditorFontSize,
   clampEditorLineHeight,
   clampEditorMarginX,
@@ -268,6 +269,13 @@ export async function initPersistence() {
     if (gl === "none" || gl === "solid" || gl === "dashed" || gl === "dotted") {
       aiSettings.editorGridLine = gl;
     }
+  }
+  /* 自动保存：开关 + 间隔（分钟，1–5）。 */
+  if (settings.autoSaveEnabled !== undefined) {
+    aiSettings.autoSaveEnabled = settings.autoSaveEnabled === "true";
+  }
+  if (settings.autoSaveMinutes !== undefined) {
+    aiSettings.autoSaveMinutes = clampAutoSaveMinutes(Number(settings.autoSaveMinutes));
   }
   if (settings.theme) {
     try {
@@ -652,6 +660,8 @@ export async function initPersistence() {
         { key: "editorMarginX", value: String(s.editorMarginX) },
         { key: "editorMarginY", value: String(s.editorMarginY) },
         { key: "editorGridLine", value: s.editorGridLine },
+        { key: "autoSaveEnabled", value: String(s.autoSaveEnabled) },
+        { key: "autoSaveMinutes", value: String(s.autoSaveMinutes) },
         { key: "theme", value: JSON.stringify(s.theme) },
       ]);
     },

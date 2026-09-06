@@ -9,6 +9,9 @@ import {
   applyProvider,
   applyTheme,
   applyFont,
+  AUTO_SAVE_MINUTES_MAX,
+  AUTO_SAVE_MINUTES_MIN,
+  clampAutoSaveMinutes,
   defaultTheme,
   fontOptions,
   EDITOR_FONT_SIZES,
@@ -482,6 +485,13 @@ function onFontSelect(event: Event) {
 
 const readingRingOpen = ref(false);
 const spotlightOpen = ref(false);
+
+/** 自动保存间隔（分钟），拖动即时生效；App.vue 的定时器随之重建。 */
+function onAutoSaveMinutesInput(event: Event) {
+  const target = event.target as HTMLInputElement;
+  aiSettings.autoSaveMinutes = clampAutoSaveMinutes(Number(target.value));
+}
+
 function onRingSizeInput(event: Event) {
   const target = event.target as HTMLInputElement;
   aiSettings.readingRingSize = clampRingSize(Number(target.value));
@@ -1373,6 +1383,50 @@ onBeforeUnmount(() => {
                   @close="colorPickerOpen = false"
                   @applied="onColorApplied"
                 />
+              </div>
+
+              <!-- 自动保存：静默执行「保存更改」。开关收进间隔面板的标题行右侧，
+                   省掉独立的说明面板；说明改由开关的悬浮提示承载。 -->
+              <div
+                class="ring-size-row auto-save-row"
+                :class="{ collapsed: !aiSettings.autoSaveEnabled }"
+              >
+                <div class="ring-size-head auto-save-head">
+                  <span class="ring-size-label">自动保存间隔</span>
+                  <span class="auto-save-head-right">
+                    <span class="ring-size-value num-tabular">
+                      {{ aiSettings.autoSaveEnabled ? aiSettings.autoSaveMinutes + " 分钟" : "已关闭" }}
+                    </span>
+                    <label
+                      class="toggle-switch"
+                      title="每隔一段时间在后台静默执行一次「保存更改」，把已关联本地文件的文档写回原文件，全程无提示；尚未保存到本地的文档不会被自动保存（需手动另存为建立关联）"
+                    >
+                      <input
+                        type="checkbox"
+                        :checked="aiSettings.autoSaveEnabled"
+                        @change="aiSettings.autoSaveEnabled = !aiSettings.autoSaveEnabled"
+                      />
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </span>
+                </div>
+
+                <template v-if="aiSettings.autoSaveEnabled">
+                  <input
+                    type="range"
+                    class="ring-size-slider"
+                    :min="AUTO_SAVE_MINUTES_MIN"
+                    :max="AUTO_SAVE_MINUTES_MAX"
+                    step="1"
+                    :value="aiSettings.autoSaveMinutes"
+                    @input="onAutoSaveMinutesInput"
+                  />
+                  <div class="ring-size-scale">
+                    <span>{{ AUTO_SAVE_MINUTES_MIN }} 分钟 更勤</span>
+                    <span>{{ AUTO_SAVE_MINUTES_MAX }} 分钟 更省</span>
+                  </div>
+                  <p class="ring-size-hint">只写回已关联本地文件、且确有改动的文档，无提示；未保存到本地的文档不参与。应用内数据库始终实时落盘，与此项无关。</p>
+                </template>
               </div>
 
               <label class="field-label" for="appFont">字体</label>
@@ -3298,6 +3352,34 @@ input:checked + .toggle-slider:before {
   border-radius: 10px;
   border: 1px solid var(--outline-variant);
   background: var(--surface-container-low);
+}
+
+/* 「自动保存」区块：开关并入间隔面板的标题行，不再单列说明面板。
+   它自成一块（不是挂在某个总开关下面的续接面板），所以上边框取实线。 */
+.auto-save-row {
+  margin: 16px 0 6px;
+  border-top-style: solid;
+}
+
+/* 标题行要容纳一枚 24px 高的开关，改用居中对齐（基线对齐会让开关偏上）。 */
+.auto-save-head {
+  align-items: center;
+}
+
+/* 关掉时只留标题行一条：去掉行下留白，面板收成一条窄条。 */
+.auto-save-row.collapsed {
+  padding-bottom: 11px;
+}
+
+.auto-save-row.collapsed .auto-save-head {
+  margin-bottom: 0;
+}
+
+.auto-save-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 .vector-master-info {

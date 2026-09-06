@@ -32,6 +32,7 @@ import {
   WrapText,
   MoreVertical,
   ArrowLeft,
+  ArrowLeftRight,
   ArrowRightLeft,
   Layers,
   RotateCcw,
@@ -173,6 +174,17 @@ function togglePreview() {
 }
 
 const isSplit = computed(() => effectiveShowEditor.value && effectiveShowPreview.value);
+
+/* 左右对调：只翻转两个窗格的视觉次序（CSS order），DOM 结构、滚动同步、
+   拖拽落点与各自的圆环槽位一概不动。--split-ratio 始终表示「markdown 侧」的
+   宽度占比，所以对调后拖分隔条要从右边量（见 startSplitDrag）。 */
+const panesSwapped = ref(false);
+
+function toggleSwapPanes() {
+  if (!isSplit.value) return;
+  panesSwapped.value = !panesSwapped.value;
+}
+
 const markdown = defineModel<string>({ default: () => docStore.markdown || "" });
 
 function handleToggleZen(mode: "markdown" | "preview" | "off") {
@@ -1193,7 +1205,10 @@ function startSplitDrag(event: MouseEvent) {
     const panes = panesRef.value;
     if (!panes) return;
     const rect = panes.getBoundingClientRect();
-    const ratio = ((e.clientX - rect.left) / rect.width) * 100;
+    /* --split-ratio 恒为 markdown 侧占比：对调后 markdown 在右边，
+       所以要用「距右边界的距离」来算，拖动方向才与手感一致。 */
+    const offset = panesSwapped.value ? rect.right - e.clientX : e.clientX - rect.left;
+    const ratio = (offset / rect.width) * 100;
     splitRatio.value = Math.min(80, Math.max(20, ratio));
   };
   const up = () => {
@@ -3305,6 +3320,21 @@ onBeforeUnmount(() => {
             <Eye :size="14" :stroke-width="1.8" />
             预览
           </button>
+          <button
+            class="view-btn view-btn-swap"
+            :class="{ active: panesSwapped }"
+            :disabled="!isSplit"
+            :aria-pressed="panesSwapped"
+            :title="
+              isSplit
+                ? (panesSwapped ? '恢复布局：markdown 在左、预览在右' : '左右对调：预览在左、markdown 在右')
+                : '左右对调：需同时显示 markdown 与预览'
+            "
+            @click="toggleSwapPanes"
+          >
+            <ArrowLeftRight :size="14" :stroke-width="1.8" />
+            对调
+          </button>
         </div>
       </div>
 
@@ -3670,7 +3700,17 @@ onBeforeUnmount(() => {
 
     <!-- Editor / Preview -->
     <div class="doc-scroll" :class="['grid-line-' + editorGridLine]">
-      <div ref="panesRef" class="panes" :class="{ split: isSplit, 'editor-only': effectiveShowEditor && !effectiveShowPreview, 'preview-only': !effectiveShowEditor && effectiveShowPreview }" :style="splitRatioStyle">
+      <div
+        ref="panesRef"
+        class="panes"
+        :class="{
+          split: isSplit,
+          swapped: isSplit && panesSwapped,
+          'editor-only': effectiveShowEditor && !effectiveShowPreview,
+          'preview-only': !effectiveShowEditor && effectiveShowPreview,
+        }"
+        :style="splitRatioStyle"
+      >
         <div v-if="effectiveShowEditor" class="editor-pane">
           <div v-if="props.zenMode === 'off'" class="read-progress" aria-hidden="true">
             <span
@@ -4207,6 +4247,37 @@ onBeforeUnmount(() => {
   cursor: default;
   color: var(--reading-text-faint);
   box-shadow: 0 3px 0 var(--surface-dim);
+}
+
+/* 「对调」按钮：与 markdown / 预览 同一档按键手感，用一道细分隔把它归为
+   「布局」而非「视图」。按下时箭头做一次左右翻转，交代它换的是位置。 */
+.view-btn-swap {
+  margin-left: 4px;
+  position: relative;
+}
+
+.view-btn-swap::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  background: var(--outline-variant);
+}
+
+.view-btn-swap svg {
+  transition: transform 0.24s ease;
+}
+
+.view-btn-swap.active svg {
+  transform: scaleX(-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-btn-swap svg {
+    transition-duration: 0.01ms;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4847,6 +4918,20 @@ onBeforeUnmount(() => {
 .panes.editor-only .editor-pane {
   flex: 1 1 100%;
   width: 100%;
+}
+
+/* 左右对调：只改 flex 次序，两个窗格的 DOM、宽度占比与内部逻辑都不变。
+   --split-ratio 仍是 markdown 侧的占比，对调后它落在右边。 */
+.panes.swapped .preview-pane {
+  order: 1;
+}
+
+.panes.swapped .split-divider {
+  order: 2;
+}
+
+.panes.swapped .editor-pane {
+  order: 3;
 }
 
 .split-divider {

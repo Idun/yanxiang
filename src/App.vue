@@ -4,7 +4,7 @@ import { FileText, Save, X } from "lucide-vue-next";
 import { cardEvents, requestCloseMap } from "./cardEvents";
 import { docStore } from "./docStore";
 import { libraryStore } from "./libraryStore";
-import { aiSettings } from "./settings";
+import { aiSettings, clampAutoSaveMinutes } from "./settings";
 import AiSettingsPanel from "./components/AiSettingsPanel.vue";
 import ChatSidebar from "./components/ChatSidebar.vue";
 import DocumentViewer from "./components/DocumentViewer.vue";
@@ -152,7 +152,11 @@ function importFile() {
       const file = createDocFile(null, fileTitle(f.name));
       file.content = f.content;
       documentFilesStore.activeFileId = file.id;
-      if (f.handle) fileHandles.set(file.id, f.handle);
+      if (f.handle) {
+        fileHandles.set(file.id, f.handle);
+        /* 刚从磁盘读进来，内容与文件本身一致：记下快照，自动保存不必空写一遍。 */
+        markSaved(file.id, f.content);
+      }
       imported.push(file.id);
     }
 
@@ -218,9 +222,10 @@ async function saveFlow() {
 async function saveFileAs() {
   const active = activeDocFile();
   const suggested = withMarkdownExtension(currentFileName());
+  const content = docStore.markdown;
   const result = await downloadTextFileWithDialog(
     suggested,
-    docStore.markdown,
+    content,
     "text/markdown;charset=utf-8",
     TEXT_PICKER_TYPES,
   );
@@ -228,6 +233,7 @@ async function saveFileAs() {
 
   if (active && result.handle) {
     fileHandles.set(active.id, result.handle as WritableHandle);
+    markSaved(active.id, content);
     if (result.handle.name) renameDocFile(active.id, result.handle.name);
   }
   showToast("已保存到本地", result.handle?.name ?? suggested, "habit");
@@ -288,6 +294,7 @@ async function confirmOverwriteSave() {
   const handle = active ? fileHandles.get(active.id) : undefined;
 
   if (handle && (await writeToHandle(handle, content))) {
+    if (active) markSaved(active.id, content);
     showToast("已保存到本地", boundFileName(handle), "habit");
     return;
   }
@@ -324,6 +331,71 @@ function saveFileAsFromDialog() {
   saveDialogOpen.value = false;
   void saveFileAs();
 }
+
+/* ---------------- 自动保存（静默执行「保存更改」）----------------
+
+   语义严格对齐手动的「保存更改」：只把已经关联过本地文件的文档写回它自己的
+   那个文件。尚未关联本地文件的文档一律不动 —— 那需要弹「另存为」选路径，
+   属于用户的显式决定，绝不能由定时器代劳。
+
+   无打扰：不弹窗、不出 toast，成功与失败都不提示；写失败就跳过，下一轮再试
+   （手动保存里的「失败则退回另存为」分支在这里刻意不走，否则会弹出文件对话框）。
+
+   覆盖范围是「所有已关联的文档」而不只是当前这一个：切走的文档同样可能有未落盘
+   的改动，而这些文档的目标文件早已由用户指定，写回去不引入任何新的用户决策。 */
+
+/** 每个文档最近一次成功写入磁盘的内容，用来跳过无改动的重复写。 */
+const savedSnapshots = new Map<string, string>();
+
+let autoSaveTimer: number | null = null;
+/** 上一轮写盘还没结束时跳过本轮，避免同一文件并发写。 */
+let autoSaveRunning = false;
+
+/** 记下某个文档「已与磁盘一致」的快照（关联建立或保存成功后调用）。 */
+function markSaved(fileId: string, content: string) {
+  savedSnapshots.set(fileId, content);
+}
+
+/** 静默把所有「已关联本地文件且有改动」的文档写回各自的文件。 */
+async function runAutoSave() {
+  if (autoSaveRunning) return;
+  /* 用户正停在保存相关的弹窗上时让位给他的这次显式操作，下一轮再来。 */
+  if (overwriteDialogOpen.value || saveDialogOpen.value) return;
+
+  autoSaveRunning = true;
+  try {
+    for (const file of documentFilesStore.files) {
+      const handle = fileHandles.get(file.id);
+      if (!handle) continue;
+      if (savedSnapshots.get(file.id) === file.content) continue;
+      const content = file.content;
+      if (await writeToHandle(handle, content)) markSaved(file.id, content);
+    }
+  } finally {
+    autoSaveRunning = false;
+  }
+}
+
+function stopAutoSaveTimer() {
+  if (autoSaveTimer !== null) {
+    window.clearInterval(autoSaveTimer);
+    autoSaveTimer = null;
+  }
+}
+
+/** 按当前设置重建定时器：关掉就只停表，开着则按分钟数重新计时。 */
+function restartAutoSaveTimer() {
+  stopAutoSaveTimer();
+  if (!aiSettings.autoSaveEnabled) return;
+  const minutes = clampAutoSaveMinutes(aiSettings.autoSaveMinutes);
+  autoSaveTimer = window.setInterval(() => void runAutoSave(), minutes * 60_000);
+}
+
+watch(
+  () => [aiSettings.autoSaveEnabled, aiSettings.autoSaveMinutes] as const,
+  restartAutoSaveTimer,
+  { immediate: true },
+);
 
 /* ---------------- Global shortcuts ---------------- */
 
@@ -369,6 +441,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onGlobalKeydown, true);
+  stopAutoSaveTimer();
 });
 </script>
 

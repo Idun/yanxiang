@@ -21,7 +21,7 @@ import { reactive, ref } from "vue";
 export const DEFAULT_CONTENT_COLOR_SCHEME: Record<string, string> = {
   /** 正文 */
   body: "#383a42",
-  /** 引号内文字（“ ” ‘ ’ 「 」 『 』 《 》 〈 〉 直引号） */
+  /** 引号内文字（“ ” ‘ ’ 「 」 『 』 《 》 〈 〉 直引号 / 全角直引号 / 半角直角引号） */
   quote: "#cb4b16",
   /** 括号内文字（( ) [ ] { } （ ） 【 】 〔 〕 ［ ］ ｛ ｝） */
   bracket: "#268bd2",
@@ -142,11 +142,11 @@ export function contentColorCssVarsOf(c: Record<string, string>): Record<string,
 /* ---------------- 字符类别表 ---------------- */
 
 /** 左引号。打开引号上下文，其后的内容按引号色着色。 */
-const QUOTE_OPEN = new Set(["“", "‘", "「", "『", "《", "〈"]);
+const QUOTE_OPEN = new Set(["“", "‘", "「", "『", "《", "〈", "｢"]);
 /** 右引号。关闭引号上下文。 */
-const QUOTE_CLOSE = new Set(["”", "’", "」", "』", "》", "〉"]);
-/** 左右同形的直引号（英文直引号）：靠「当前栈顶是不是同一种」来判开合。 */
-const SYMMETRIC_QUOTE = new Set(['"', "'"]);
+const QUOTE_CLOSE = new Set(["”", "’", "」", "』", "》", "〉", "｣"]);
+/** 左右同形的直引号（英文直引号 / 全角直引号）：靠「当前栈顶是不是同一种」来判开合。 */
+const SYMMETRIC_QUOTE = new Set(['"', "'", "＂", "＇"]);
 
 /** 左括号。压栈并按括号色着色。 */
 const BRACKET_OPEN = new Set([
@@ -376,12 +376,26 @@ export function applyContentColoring(html: string): string {
       continue;
     }
 
-    /* HTML 实体：整体透传，不拆开着色。 */
+    /* HTML 实体：整体透传，不拆开着色。
+     * 唯一的例外是引号实体（标记渲染会顺手把正文里的半角直引号逃逸成
+     * `&quot;` / `&#39;`）。还原成字符送进 processText，让半角引号
+     * 跟上色、参与配对——否则整句对白因为「引号是实体」而漏色。 */
     if (ch === "&") {
       const semi = html.indexOf(";", i);
       if (semi !== -1 && semi - i <= 12) {
-        flushText();
-        out.push(html.slice(i, semi + 1));
+        const entity = html.slice(i, semi + 1);
+        const decoded =
+          entity === "&quot;" || entity === "&#34;"
+            ? '"'
+            : entity === "&#39;" || entity === "&apos;"
+              ? "'"
+              : "";
+        if (decoded) {
+          textBuf += decoded;
+        } else {
+          flushText();
+          out.push(entity);
+        }
         i = semi + 1;
         continue;
       }

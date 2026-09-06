@@ -191,6 +191,22 @@ export function clampEditorMarginY(my: number): number {
   return Math.min(200, Math.max(0, Math.round(my)));
 }
 
+/* ---------------- 自动保存（静默执行「保存更改」）----------------
+   间隔以分钟计，区间 1–5 分钟。默认取区间中位数 3 分钟：足够勤，又不会
+   把已关联的本地文件写得过于频繁。 */
+
+export const AUTO_SAVE_MINUTES_MIN = 1;
+export const AUTO_SAVE_MINUTES_MAX = 5;
+export const DEFAULT_AUTO_SAVE_MINUTES = 3;
+
+export function clampAutoSaveMinutes(minutes: number): number {
+  if (!Number.isFinite(minutes)) return DEFAULT_AUTO_SAVE_MINUTES;
+  return Math.min(
+    AUTO_SAVE_MINUTES_MAX,
+    Math.max(AUTO_SAVE_MINUTES_MIN, Math.round(minutes)),
+  );
+}
+
 export interface BuiltinVectorModel {
   id: string;
   name: string;
@@ -288,6 +304,11 @@ export const aiSettings = reactive({
   editorMarginX: DEFAULT_EDITOR_MARGIN_X,
   editorMarginY: DEFAULT_EDITOR_MARGIN_Y,
   editorGridLine: "none" as EditorGridLine,
+  /* 自动保存：静默执行「保存更改」——只把已关联本地文件的当前文档写回那个文件，
+     从不为「尚未关联本地文件」的文档弹出另存对话框（那属于用户的显式动作）。
+     默认开启，间隔 AUTO_SAVE_MINUTES_MIN ~ AUTO_SAVE_MINUTES_MAX 分钟。 */
+  autoSaveEnabled: true,
+  autoSaveMinutes: DEFAULT_AUTO_SAVE_MINUTES,
   /* 选中文字浮现工具栏开关（默认开启，可在设置→配置中关闭）。 */
   selectionToolbarEnabled: true,
   /* 修订与批注（图层式修订）开关（默认开启，可在设置→配置中关闭）。
