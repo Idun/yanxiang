@@ -12,6 +12,8 @@ import type { KnowledgeFile } from "../settings";
  *  - Writer tab  ➜ AI写作——反面例子.md、禁止模式.md、人类写作 vs AI写作.md、
  *    网络文学小白作者与网文读者受众画像及写作规范深度研究报告.md
  *  - Auditor tab ➜ AI写作——反面例子.md、自查评分表.md、禁止模式.md
+ *  - Reader tab  ➜ 网文读者受众画像与心理研究（网络文学小白作者与网文读者
+ *    受众画像及写作规范深度研究报告.md）、真实书评语料.md、爽点毒点清单.md
  */
 
 const mdSources = import.meta.glob("./md/*.md", {
@@ -50,4 +52,14 @@ export const BUNDLED_AUDITOR_KNOWLEDGE: KnowledgeFile[] = [
   bundled("AI写作——反面例子.md", "builtin:auditor:ai-negative-examples"),
   bundled("自查评分表.md", "builtin:auditor:self-check"),
   bundled("禁止模式.md", "builtin:auditor:forbidden-patterns"),
+];
+
+/** 「读者评估」选项卡的默认知识项（随应用打包内嵌，离线可用）。 */
+export const BUNDLED_READER_KNOWLEDGE: KnowledgeFile[] = [
+  bundled(
+    "网络文学小白作者与网文读者受众画像及写作规范深度研究报告.md",
+    "builtin:reader:webnovel-audience",
+  ),
+  bundled("真实书评语料.md", "builtin:reader:reader-comments-corpus"),
+  bundled("爽点毒点清单.md", "builtin:reader:shuang-and-du"),
 ];

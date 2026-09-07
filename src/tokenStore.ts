@@ -23,6 +23,8 @@ export type TokenCategory =
   | "writer"
   /** 侧栏「审稿」Agent */
   | "auditor"
+  /** 侧栏「读者评估」Agent */
+  | "reader"
   /** 逐句精修的改写请求 */
   | "refine"
   /** 精修前让 agent 读知识项、提炼判据清单 */
@@ -43,13 +45,14 @@ export const TOKEN_CATEGORIES: TokenCategoryMeta[] = [
   { key: "chat", label: "对话", hint: "AI 侧栏「对话」标签的通用问答" },
   { key: "writer", label: "写作", hint: "AI 侧栏「写作」Agent" },
   { key: "auditor", label: "审稿", hint: "AI 侧栏「审稿」Agent" },
+  { key: "reader", label: "读者", hint: "AI 侧栏「读者评估」Agent" },
   { key: "refine", label: "精修", hint: "逐句精修的改写请求" },
   { key: "knowledge", label: "知识", hint: "精修前读取知识项、提炼判据清单" },
   { key: "editor", label: "编辑器", hint: "编辑器内的润色 / 续写 / 依习惯生成" },
 ];
 
 function emptyBuckets(): Record<TokenCategory, number> {
-  return { chat: 0, writer: 0, auditor: 0, refine: 0, knowledge: 0, editor: 0 };
+  return { chat: 0, writer: 0, auditor: 0, reader: 0, refine: 0, knowledge: 0, editor: 0 };
 }
 
 /** 单日用量桶。byCategory / calls 用 Partial：一天可能只跑过其中几个来源。 */
@@ -151,7 +154,7 @@ export interface TokenBreakdownItem extends TokenCategoryMeta {
 }
 
 export interface CoreTokenCategoryItem {
-  key: "chat" | "writer" | "auditor";
+  key: "chat" | "writer" | "auditor" | "reader";
   label: string;
   tokens: number;
   calls: number;
@@ -164,6 +167,7 @@ export function coreTokenBreakdown(): CoreTokenCategoryItem[] {
     { key: "chat", label: "对话", tokens: t.byCategory.chat || 0, calls: t.calls.chat || 0 },
     { key: "writer", label: "写作", tokens: t.byCategory.writer || 0, calls: t.calls.writer || 0 },
     { key: "auditor", label: "审核", tokens: t.byCategory.auditor || 0, calls: t.calls.auditor || 0 },
+    { key: "reader", label: "读者", tokens: t.byCategory.reader || 0, calls: t.calls.reader || 0 },
   ];
 }
 
@@ -171,7 +175,7 @@ export function coreTokenBreakdown(): CoreTokenCategoryItem[] {
 export function otherTokenBreakdown(): TokenBreakdownItem[] {
   const t = todayUsage();
   const total = t.total;
-  const coreKeys: TokenCategory[] = ["chat", "writer", "auditor"];
+  const coreKeys: TokenCategory[] = ["chat", "writer", "auditor", "reader"];
   return TOKEN_CATEGORIES
     .filter((meta) => !coreKeys.includes(meta.key))
     .map((meta) => ({

@@ -76,6 +76,118 @@ function isWordChar(ch: string): boolean {
   return /[0-9A-Za-z\u00c0-\u024f\u4e00-\u9fff]/.test(ch);
 }
 
+/* ---------------- 纯函数校正（供 WYSIWYG 编辑区与单测共用） ----------------
+ *
+ * 文档级监听的文本域通道把「快照 + 校正」拆成了两步，但校正那一半其实不依赖
+ * 元素本身 —— 只要给出改动前后的文本与选区，就能算出该补什么。这里把这一半
+ * 抽成纯函数，WYSIWYG（contenteditable）在 input 之后按同样的规则校正，规则
+ * 只维护这一份，两种编辑区行为完全一致。 */
+
+/** 校正结果：改写后的文本与新的光标 / 选区（相对文本首部）。 */
+export interface PairEditResult {
+  next: string;
+  selStart: number;
+  selEnd: number;
+}
+
+/** 「before + 插入 ch（替换 [s,e)）」是否正好等于 after，且光标落在插入内容之后。 */
+function cleanInsert(
+  before: string,
+  s: number,
+  e: number,
+  ch: string,
+  after: string,
+  caret: number,
+): boolean {
+  return after === before.slice(0, s) + ch + before.slice(e) && caret === s + ch.length;
+}
+
+/**
+ * 键入一个字符后的成对标点校正（纯函数）。
+ *
+ * 与文本域通道同一套规则：
+ *   1. 原本选中一段 → 用这个左标点把整段包起来，包完保持选中；
+ *   2. 光标正压在同一个右标点上 → 撤掉刚打的字符直接跨过去
+ *      （同形引号借此自动区分开合，不写出重复的一半）；
+ *   3. 同形引号紧跟在词内字符后面 → 按撇号 / 收尾引号处理，不补全；
+ *   4. 否则普通补全：另一半贴在光标后面，光标原地待命。
+ *
+ * 返回 null 表示无需校正（不是成对标点、或快照对不上当前值）。
+ */
+export function computeInsertPairCorrection(
+  before: string,
+  beforeStart: number,
+  beforeEnd: number,
+  after: string,
+  caret: number,
+  ch: string,
+): PairEditResult | null {
+  const s = Math.min(beforeStart, beforeEnd);
+  const e = Math.max(beforeStart, beforeEnd);
+  const collapsed = s === e;
+
+  /* 1) 原本选中了一段 → 整段包起来，包完保持选中。 */
+  if (!collapsed) {
+    const close = OPEN_TO_CLOSE.get(ch);
+    if (!close || !cleanInsert(before, s, e, ch, after, caret)) return null;
+    const inner = before.slice(s, e);
+    return {
+      next: before.slice(0, s) + ch + inner + close + before.slice(e),
+      selStart: s + ch.length,
+      selEnd: s + ch.length + inner.length,
+    };
+  }
+
+  /* 2) 光标原本正压在同一个右标点上 → 撤掉刚打的这个，直接跨过去。 */
+  if (CLOSERS.has(ch) && before.slice(s, s + ch.length) === ch) {
+    if (!cleanInsert(before, s, e, ch, after, caret)) return null;
+    return { next: after.slice(0, caret - ch.length) + after.slice(caret), selStart: caret, selEnd: caret };
+  }
+
+  const close = OPEN_TO_CLOSE.get(ch);
+  if (!close) return null;
+
+  /* 3) 同形引号紧跟在词内字符后面 → 按撇号处理，不补全。 */
+  if (SYMMETRIC.has(ch) && isWordChar(before.slice(s - 1, s))) return null;
+
+  /* 4) 普通补全。 */
+  if (!cleanInsert(before, s, e, ch, after, caret)) return null;
+  return { next: after.slice(0, caret) + close + after.slice(caret), selStart: caret, selEnd: caret };
+}
+
+/**
+ * 退格后的成对标点校正（纯函数）：一对空标点中间按退格，两半一起删。
+ * 返回 null 表示无需校正（普通退格）。
+ */
+export function computeDeletePairCorrection(
+  before: string,
+  beforeStart: number,
+  beforeEnd: number,
+  after: string,
+  caret: number,
+): PairEditResult | null {
+  if (beforeStart !== beforeEnd || beforeStart === 0) return null;
+  const opener = before.slice(beforeStart - 1, beforeStart);
+  const close = OPEN_TO_CLOSE.get(opener);
+  if (!close) return null;
+  if (before.slice(beforeStart, beforeStart + close.length) !== close) return null;
+  /* 快照要与当前值自圆其说：这次退格删掉的正好是那个左半。 */
+  if (after !== before.slice(0, beforeStart - 1) + before.slice(beforeStart)) return null;
+  if (caret !== beforeStart - 1) return null;
+  if (after.slice(caret, caret + close.length) !== close) return null;
+  return { next: after.slice(0, caret) + after.slice(caret + close.length), selStart: caret, selEnd: caret };
+}
+
+/** 取某个左标点对应的另一半；不是左标点返回空串。 */
+export function pairCloseFor(ch: string): string {
+  return OPEN_TO_CLOSE.get(ch) ?? "";
+}
+
+/** 左右同形的标点（如英文直引号）：组合通道里分不出开合，宁可不补。 */
+export function isSymmetricPair(ch: string): boolean {
+  return SYMMETRIC.has(ch);
+}
+
 type PairableElement = HTMLTextAreaElement | HTMLInputElement;
 
 /** 只在纯文本输入框上工作；密码框、数字框之类一律跳过。 */

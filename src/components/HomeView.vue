@@ -1170,9 +1170,10 @@ onBeforeUnmount(() => {
 
 .token-hud-top-container {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-start;
+  gap: 6px 8px;
 }
 
 .token-hud-total-box {
@@ -1182,33 +1183,39 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 
+/* 四个核心分类（对话 / 写作 / 审核 / 读者）排成 2×2 网格，横向占位更紧凑，
+   不会再像单排四个那样把卡片撑破；空间确实不够时整体换行到总量下方，绝不被裁剪。 */
 .token-hud-core-group {
-  display: flex;
+  margin-left: auto;
+  flex-shrink: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, auto);
   align-items: center;
-  gap: 6px;
+  column-gap: 10px;
+  row-gap: 2px;
   padding: 3px 8px;
   background: var(--surface-container-low);
   border: 1px solid var(--outline-variant);
   border-radius: 8px;
-  flex-shrink: 0;
 }
 
 .token-hud-core-item {
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 28px;
+  min-width: 20px;
 }
 
 .token-hud-core-label {
-  font-size: 9.5px;
+  font-size: 9px;
   color: var(--on-surface-variant);
   opacity: 0.8;
   white-space: nowrap;
 }
 
 .token-hud-core-value {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   color: var(--primary);
   white-space: nowrap;
@@ -1644,6 +1651,24 @@ onBeforeUnmount(() => {
 
   .goal-card {
     gap: 10px;
+  }
+
+  /* 卡片更窄时让四个核心分类再收紧一档，尽量保持与总量同行不换行。 */
+  .token-hud-core-group {
+    column-gap: 7px;
+    padding: 3px 6px;
+  }
+
+  .token-hud-core-item {
+    min-width: 16px;
+  }
+
+  .token-hud-core-label {
+    font-size: 8.5px;
+  }
+
+  .token-hud-core-value {
+    font-size: 9.5px;
   }
 
   .token-hud-total {

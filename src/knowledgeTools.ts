@@ -9,12 +9,13 @@ import { aiSettings, type KnowledgeFile } from "./settings";
  * needs — the same way a coding agent reads source files.
  */
 
-export type KnowledgeScope = "chat" | "writer" | "auditor";
+export type KnowledgeScope = "chat" | "writer" | "auditor" | "reader";
 
 export function knowledgeList(scope: KnowledgeScope): KnowledgeFile[] {
   if (scope === "chat") return aiSettings.chatKnowledge;
   if (scope === "writer") return aiSettings.writerKnowledge;
-  return aiSettings.auditorKnowledge;
+  if (scope === "auditor") return aiSettings.auditorKnowledge;
+  return aiSettings.readerKnowledge;
 }
 
 const DEFAULT_READ_LIMIT = 240;
@@ -68,6 +69,7 @@ const SCOPE_LABEL: Record<KnowledgeScope, string> = {
   chat: "对话",
   writer: "AI写作",
   auditor: "审核意见",
+  reader: "读者评估",
 };
 
 /**

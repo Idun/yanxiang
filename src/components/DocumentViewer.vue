@@ -26,6 +26,7 @@ import {
   Check,
   X,
   FileCode,
+  FilePenLine,
   Palette,
   PanelLeftOpen,
   Search,
@@ -83,6 +84,7 @@ import {
 } from "../documentFilesStore";
 import DocumentSidebar from "./DocumentSidebar.vue";
 import ReadingProgressRing from "./ReadingProgressRing.vue";
+import MarkdownWysiwyg from "./MarkdownWysiwyg.vue";
 import InlineAiEdit from "./InlineAiEdit.vue";
 import RevisionAnnotation from "./RevisionAnnotation.vue";
 import {
@@ -145,16 +147,22 @@ const ringSlotBase = computed(
 /* 嵌入式小编辑框（画布卡片 / 拼接弹窗）里圆环收得更小，不抢正文的地方。 */
 const ringMaxSize = computed(() => (props.embedded ? 34 : RING_SIZE_MAX));
 
+const showWysiwyg = ref(false);
 const showEditor = ref(true);
 const showPreview = ref(!props.singleEditor);
 
+/** WYSIWYG 组件实例引用：工具栏在 WYSIWYG 模式下把动作转发到它。 */
+const wysiwygRef = ref<InstanceType<typeof MarkdownWysiwyg> | null>(null);
+
 const effectiveShowEditor = computed(() => {
+  if (showWysiwyg.value) return false;
   if (props.zenMode === "markdown") return true;
   if (props.zenMode === "preview") return false;
   return showEditor.value;
 });
 
 const effectiveShowPreview = computed(() => {
+  if (showWysiwyg.value) return false;
   if (props.zenMode === "preview") return true;
   if (props.zenMode === "markdown") return false;
   return showPreview.value;
@@ -163,27 +171,72 @@ const effectiveShowPreview = computed(() => {
 /* 折叠左侧文档面板（由父级控制，分栏时左折叠 / 右展开）。 */
 const sidebarCollapsed = defineModel<boolean>("sidebarCollapsed", { default: false });
 
+function toggleWysiwyg() {
+  if (showWysiwyg.value) return;
+  showWysiwyg.value = true;
+}
+
 function toggleEditor() {
+  if (showWysiwyg.value) {
+    showWysiwyg.value = false;
+    showEditor.value = true;
+    showPreview.value = false;
+    return;
+  }
   if (showEditor.value && !showPreview.value) return;
   showEditor.value = !showEditor.value;
 }
 
 function togglePreview() {
+  if (showWysiwyg.value) {
+    showWysiwyg.value = false;
+    showPreview.value = true;
+    showEditor.value = false;
+    return;
+  }
   if (showPreview.value && !showEditor.value) return;
   showPreview.value = !showPreview.value;
 }
 
-const isSplit = computed(() => effectiveShowEditor.value && effectiveShowPreview.value);
+const isSplit = computed(() => !showWysiwyg.value && effectiveShowEditor.value && effectiveShowPreview.value);
 
 /* 左右对调：只翻转两个窗格的视觉次序（CSS order），DOM 结构、滚动同步、
    拖拽落点与各自的圆环槽位一概不动。--split-ratio 始终表示「markdown 侧」的
-   宽度占比，所以对调后拖分隔条要从右边量（见 startSplitDrag）。 */
+   宽度占比，所以对调后拖分隔条要从右边量（见 startSplitDrag）。
+   注意：当处于所见即所得模式时，对调不可被点选。 */
 const panesSwapped = ref(false);
 
 function toggleSwapPanes() {
-  if (!isSplit.value) return;
+  if (showWysiwyg.value || !isSplit.value) return;
   panesSwapped.value = !panesSwapped.value;
 }
+
+watch(
+  () => props.zenMode,
+  (mode) => {
+    if (mode !== "off") {
+      showWysiwyg.value = false;
+    }
+  },
+);
+
+/* 编辑模式切换（WYSIWYG ⇄ markdown/预览）时清掉上一模式的浮层状态，
+   避免旧模式的选中工具栏 / 更多菜单 / 右键菜单残留在新模式里。 */
+watch(showWysiwyg, () => {
+  showSelectionToolbar.value = false;
+  selectionMenuOpen.value = false;
+  clearSelectionTimer();
+  if (ctxMenu.value.show) closeContextMenu();
+  anchorByMouse = false;
+  selectionMousePos.value = null;
+  /* 阅读位置跨模式不丢：切换前先把还挂着的视图滚动落定（此刻旧视图仍在 DOM，
+     能读到真实 scrollTop），新视图挂载后再读回它自己那份记忆 —— 切走再切回、
+     WYSIWYG ⇄ markdown / 预览，都停在各自的上次阅读位置。 */
+  flushReadingPosition();
+  void nextTick(() => {
+    requestAnimationFrame(() => restoreReadingPosition());
+  });
+});
 
 const markdown = defineModel<string>({ default: () => docStore.markdown || "" });
 
@@ -409,7 +462,9 @@ function hasLayout(): boolean {
   if (root && root.clientHeight > 0) return true;
   const editor = editorRef.value;
   const preview = previewRef.value;
-  return (editor?.clientHeight ?? 0) > 0 || (preview?.clientHeight ?? 0) > 0;
+  if ((editor?.clientHeight ?? 0) > 0 || (preview?.clientHeight ?? 0) > 0) return true;
+  const wysiwygScroll = wysiwygRef.value?.getScrollContainer();
+  return (wysiwygScroll?.clientHeight ?? 0) > 0;
 }
 
 /** 该文档自己的正文长度。切换文档时 markdown 已经换成新文档了，不能拿它当基准。 */
@@ -418,12 +473,13 @@ function contentLengthOf(fileId: string): number {
   return file ? file.content.length : markdown.value.length;
 }
 
-/** 立即把当前两个窗格的滚动位置记进 store。 */
+/** 立即把当前可见窗格的滚动位置记进 store。 */
 function flushReadingPosition(fileId = positionKey()) {
   if (!fileId || restoringPosition || !hasLayout()) return;
   const editor = editorRef.value;
   const preview = previewRef.value;
-  if (!editor && !preview) return;
+  const wysiwygScroll = wysiwygRef.value?.getScrollContainer() ?? null;
+  if (!editor && !preview && !wysiwygScroll) return;
 
   const patch: Parameters<typeof setReadingPosition>[1] = {
     length: contentLengthOf(fileId),
@@ -437,6 +493,11 @@ function flushReadingPosition(fileId = positionKey()) {
     const max = contentScrollMax(preview, previewRunwayPx.value);
     patch.previewTop = preview.scrollTop;
     patch.previewRatio = max > 0 ? Math.min(1, preview.scrollTop / max) : 0;
+  }
+  if (wysiwygScroll) {
+    const max = wysiwygScroll.scrollHeight - wysiwygScroll.clientHeight;
+    patch.wysiwygTop = wysiwygScroll.scrollTop;
+    patch.wysiwygRatio = max > 0 ? Math.min(1, wysiwygScroll.scrollTop / max) : 0;
   }
   setReadingPosition(fileId, patch);
 }
@@ -452,7 +513,8 @@ function scheduleReadingPositionSave() {
 }
 
 /**
- * 把两个窗格滚到记忆位置；没有记忆（从未读过）则回到文首。
+ * 把当前可见的窗格（编辑区 / 预览区 / 所见即所得）滚到各自的记忆位置；
+ * 没有记忆（从未读过）则回到文首。
  *
  * 必须做两轮：上面那条「内容变化后保持原滚动位置」的 post watch 会在本轮
  * nextTick 里把 scrollTop 设回切换前的偏移，第二轮（rAF）才是最终落点，
@@ -475,6 +537,22 @@ function restoreReadingPosition(fileId: string | null = positionKey()) {
     if (preview) {
       const max = contentScrollMax(preview, previewRunwayPx.value);
       preview.scrollTop = resolveScrollTop(saved, "preview", max, length);
+    }
+    const wysiwygScroll = wysiwygRef.value?.getScrollContainer() ?? null;
+    if (wysiwygScroll) {
+      const max = wysiwygScroll.scrollHeight - wysiwygScroll.clientHeight;
+      if (max > 0) {
+        /* 优先用所见即所得自己记下的位置；从没在 WYSIWYG 里读过这篇时，
+           按「编辑区 / 预览区」的比例续上，切换模式不会一头扎回文首。 */
+        let top: number;
+        if (saved && (saved.wysiwygTop > 0 || saved.wysiwygRatio > 0)) {
+          top = resolveScrollTop(saved, "wysiwyg", max, length);
+        } else {
+          const seed = saved ? Math.max(saved.editorRatio, saved.previewRatio) : 0;
+          top = Math.round(seed * max);
+        }
+        wysiwygScroll.scrollTop = Math.min(max, Math.max(0, top));
+      }
     }
     updateEditorProgress();
     updatePreviewProgress();
@@ -617,8 +695,12 @@ const TYPING_MERGE_MS = 450;
 const TYPING_MERGE_MAX_DELTA = 8;
 
 /* 快照栈用 shallowRef：整条替换才需要响应式（驱动按钮禁用态），
-   合并写入栈顶那一条不必惊动渲染，也省掉给几百条长文本套代理的开销。 */
-const history = shallowRef<HistorySnap[]>([{ text: markdown.value, selStart: 0, selEnd: 0 }]);
+   合并写入栈顶那一条不必惊动渲染，也省掉给几百条长文本套代理的开销。
+   基准点（第 0 条）的选区默认落在文本末尾：撤销到底时光标回到文末等待
+   继续输入，而不是硬编码 0,0 把光标甩回文首。 */
+const history = shallowRef<HistorySnap[]>([
+  { text: markdown.value, selStart: markdown.value.length, selEnd: markdown.value.length },
+]);
 const historyIndex = ref(0);
 /** 正在回放的历史文本：watch 认出它就跳过记账，避免撤销动作本身又进栈。 */
 let restoringText: string | null = null;
@@ -637,7 +719,7 @@ const canRedo = computed(() => historyIndex.value < history.value.length - 1);
 
 /** 把历史清空并以 text 作为唯一基准点（切换文档时用，避免撤销串到别的文档）。 */
 function resetHistory(text: string) {
-  history.value = [{ text, selStart: 0, selEnd: 0 }];
+  history.value = [{ text, selStart: text.length, selEnd: text.length }];
   historyIndex.value = 0;
   restoringText = null;
   historyBreak = true;
@@ -707,6 +789,12 @@ function recordHistory(text: string) {
 }
 
 function currentSelection(): { selStart: number; selEnd: number } {
+  /* WYSIWYG 模式下 textarea 隐藏，选区要从所见即所得编辑区里取
+     （统一以 markdown 文本偏移表达，与 textarea 同一套数值）。 */
+  if (showWysiwyg.value) {
+    const off = wysiwygRef.value?.docSelectionOffsets();
+    return off ? { selStart: off.start, selEnd: off.end } : { selStart: 0, selEnd: 0 };
+  }
   const el = editorRef.value;
   if (!el) return { selStart: 0, selEnd: 0 };
   return { selStart: el.selectionStart ?? 0, selEnd: el.selectionEnd ?? 0 };
@@ -715,10 +803,10 @@ function currentSelection(): { selStart: number; selEnd: number } {
 /** 光标移动时顺手刷新栈顶快照的选区，撤销回来时光标能落回离开时的位置。 */
 function syncTopSelection() {
   const snap = history.value[historyIndex.value];
-  const el = editorRef.value;
-  if (!snap || !el || snap.text !== markdown.value) return;
-  snap.selStart = el.selectionStart ?? 0;
-  snap.selEnd = el.selectionEnd ?? 0;
+  if (!snap || snap.text !== markdown.value) return;
+  const sel = currentSelection();
+  snap.selStart = sel.selStart;
+  snap.selEnd = sel.selEnd;
 }
 
 /* 所有正文改动的唯一记账入口。放在 flush: "sync" 上，保证工具栏那种
@@ -738,6 +826,11 @@ function applySnapshot(snap: HistorySnap) {
     markdown.value = snap.text;
   }
   nextTick(() => {
+    if (showWysiwyg.value) {
+      /* 所见即所得：DOM 已由 modelValue 回流重渲染，把选区按快照偏移放回去。 */
+      wysiwygRef.value?.restoreDocSelection(snap.selStart, snap.selEnd);
+      return;
+    }
     const el = editorRef.value;
     if (!el) return;
     el.focus();
@@ -747,9 +840,18 @@ function applySnapshot(snap: HistorySnap) {
   });
 }
 
+/** 聚焦当前实际在用的编辑区（markdown 编辑框 / WYSIWYG 画布）。 */
+function focusActiveEditor() {
+  if (showWysiwyg.value) {
+    wysiwygRef.value?.focusEditor();
+    return;
+  }
+  editorRef.value?.focus();
+}
+
 function undo() {
   if (!canUndo.value) {
-    if (editorRef.value) editorRef.value.focus();
+    focusActiveEditor();
     return;
   }
   syncTopSelection();
@@ -760,7 +862,7 @@ function undo() {
 
 function redo() {
   if (!canRedo.value) {
-    if (editorRef.value) editorRef.value.focus();
+    focusActiveEditor();
     return;
   }
   historyIndex.value += 1;
@@ -969,15 +1071,21 @@ const editorWrapStyle = computed(() => {
 
 /* 预览纸面内边距。底部除固定留白外再叠一段 --pv-runway（打字机跑道）：
    读到最后一段时它也能停在面板中部，与编辑区同款观感；同时这段跑道是
-   两侧同步滚动能对齐的前提（见 syncFromEditor 的分段映射）。 */
+   两侧同步滚动能对齐的前提（见 syncFromEditor 的分段映射）。
+   横向留白与 markdown 编辑区同一套公式（--ed-pad-x = max(边距, 居中列宽)）：
+   宽窗时正文列收在 --reading-measure 内并居中，与 markdown 编辑区 / WYSIWYG
+   的文字区域宽度一致。 */
 const paperCardStyle = computed(() => {
   const lineH = Number((editorFontSize.value * editorLineHeight.value).toFixed(2));
+  const floor = Math.max(44, editorMarginX.value + 16);
+  const padX = `max(${floor}px, calc((100% - var(--reading-measure)) / 2))`;
   return {
     "--ed-font-size": editorFontSize.value + "px",
     "--ed-line-height": editorLineHeight.value,
     "--ed-line-height-px": lineH + "px",
     "--ed-pad-y": editorMarginY.value + "px",
-    padding: `${editorMarginY.value + 18}px ${Math.max(24, editorMarginX.value + 16)}px calc(96px + ${previewRunwayPx.value}px)`,
+    "--ed-pad-x": padX,
+    padding: `${editorMarginY.value + 18}px ${padX} calc(96px + ${previewRunwayPx.value}px) ${padX}`,
   };
 });
 
@@ -1071,6 +1179,14 @@ const findCaseSensitive = ref(false);
 const findIndex = ref(0);
 const findInputRef = ref<HTMLInputElement | null>(null);
 
+/** 查找高亮状态：供 WYSIWYG 编辑区画布就地包裹命中 <mark>。 */
+const findHighlight = computed(() => ({
+  open: findOpen.value,
+  text: findText.value,
+  caseSensitive: findCaseSensitive.value,
+  index: findIndex.value,
+}));
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -1094,7 +1210,14 @@ const findMatches = computed<number[]>(() => {
 
 function getSelectedText(): string {
   let selected = "";
-  if (editorRef.value) {
+  /* WYSIWYG 模式没有 textarea，取编辑区内的 markdown 原文（含 ** 等语法标记），
+     供 Ctrl+F 自动填充与右键「润色选段」等使用。 */
+  if (showWysiwyg.value) {
+    const off = wysiwygRef.value?.getSelectionOffsets();
+    if (off) {
+      selected = markdown.value.slice(off.start, off.end);
+    }
+  } else if (editorRef.value) {
     const start = editorRef.value.selectionStart;
     const end = editorRef.value.selectionEnd;
     if (start !== undefined && end !== undefined && start < end) {
@@ -1151,12 +1274,18 @@ function focusMatch(n: number) {
   const idx = ((n % total) + total) % total;
   findIndex.value = idx;
   const start = findMatches.value[idx];
+  const end = start + findText.value.length;
+  if (showWysiwyg.value) {
+    /* WYSIWYG：直接在编辑区内选中命中并滚动，不触碰查找框焦点。 */
+    wysiwygRef.value?.selectRawRangeForFind(start, end);
+    return;
+  }
   const el = editorRef.value;
   if (!el) return;
   if (!showEditor.value) showEditor.value = true;
   nextTick(() => {
     /* 不调用 el.focus()，避免焦点跑到正文编辑区，导致后续回车变成换行。 */
-    el.setSelectionRange(start, start + findText.value.length);
+    el.setSelectionRange(start, end);
     /* 粗略滚动定位：按命中前的换行数估算行号。 */
     const line = markdown.value.slice(0, start).split("\n").length - 1;
     el.scrollTop = Math.max(0, line * editorFontSize.value * 1.6 - el.clientHeight / 2);
@@ -1373,6 +1502,21 @@ function lineIndexOf(text: string, offset: number): number {
   return line;
 }
 
+/** 高亮覆盖层与 textarea 逐字对齐：textarea 的 clientWidth 已扣除垂直滚动条，
+   而覆盖层 min-width:100% 是父容器全宽、多出滚动条那 6px —— 差出的 6px 会让
+   软换行点逐行错位、命中底色越到文末偏得越离谱（整行被换到别处）。这里把
+   覆盖层宽度同步成 textarea 的实际内容宽（border-box 同值、同 padding，
+   内容宽即对齐），保证命中文字与下方真实文字严格重合。 */
+function syncEditorHighlightSize() {
+  const el = editorRef.value;
+  const hl = highlightRef.value;
+  if (!el || !hl) return;
+  const w = el.clientWidth;
+  if (w <= 0) return;
+  hl.style.width = w + "px";
+  hl.style.minWidth = w + "px";
+}
+
 /** 与 textarea 内容逐字对齐的命中 / 修订 / 聚光 HTML */
 const highlightedEditorHtml = computed(() => {
   const text = markdown.value;
@@ -1420,13 +1564,15 @@ function onEditorScroll() {
   if (el && hl) {
     hl.style.transform = `translate(${-el.scrollLeft}px, ${-el.scrollTop}px)`;
   }
+  syncEditorHighlightSize();
   /* 选中工具栏显示期间滚动，保持其跟随选中文字（重新以当前滚动位置定位）。
      滚动后光标位置不再有意义，锚点回退为跟随选中文字本身。 */
   if (showSelectionToolbar.value) {
     anchorByMouse = false;
     selectionMousePos.value = null;
     selectionMenuOpen.value = false;
-    positionSelectionBar();
+    if (showWysiwyg.value) positionWysiwygSelectionBar();
+    else positionSelectionBar();
   }
 }
 
@@ -1598,6 +1744,41 @@ function applyLineStyle(style: LineStyle) {
   });
 }
 
+/* ---------------- 工具栏动作 → WYSIWYG 桥接 ----------------
+   WYSIWYG 模式下 textarea 隐藏，工具栏的选区/行级操作无法作用到
+   contenteditable；这里把动作转发给 <MarkdownWysiwyg> 暴露的方法。 */
+function wrapSelectionVia(before: string, after = before, placeholder = "文本") {
+  if (showWysiwyg.value) {
+    wysiwygRef.value?.wrapSelection(before, after, placeholder);
+    return;
+  }
+  wrapSelection(before, after, placeholder);
+}
+
+function applyLineStyleVia(style: LineStyle) {
+  if (showWysiwyg.value) {
+    wysiwygRef.value?.applyLineStyle(style);
+    return;
+  }
+  applyLineStyle(style);
+}
+
+function insertCodeBlockVia() {
+  if (showWysiwyg.value) {
+    wysiwygRef.value?.insertCodeBlock();
+    return;
+  }
+  insertCodeBlock();
+}
+
+function insertLinkVia() {
+  if (showWysiwyg.value) {
+    wysiwygRef.value?.insertLink();
+    return;
+  }
+  insertLink();
+}
+
 /* ---------------- 工具栏下拉菜单（标题档位 / 列表类型） ----------------
    工具栏本身是横向滚动容器（overflow 裁剪），菜单挂在容器内会被切掉，
    因此 Teleport 到 body 用视口坐标定位，与「选中浮现工具栏」同一套做法。 */
@@ -1623,6 +1804,10 @@ const HEADING_LEVELS: { style: LineStyle; label: string; icon: Component }[] = [
 
 /** 光标所在行当前的行级标记，用于给菜单项打勾。 */
 const currentLineStyle = computed<LineStyle | null>(() => {
+  if (showWysiwyg.value) {
+    /* WYSIWYG 模式下以组件内部光标所在块的标记为准。 */
+    return (wysiwygRef.value?.focusedLineStyle ?? null) as LineStyle | null;
+  }
   const text = markdown.value;
   const at = Math.min(caretPos.value, text.length);
   const from = text.lastIndexOf("\n", at - 1) + 1;
@@ -1693,7 +1878,7 @@ function toggleToolMenu(which: "heading" | "list") {
 /** 菜单项落地：先关菜单再改正文，一次点击对应一条撤销历史。 */
 function pickLineStyle(style: LineStyle) {
   closeToolMenus();
-  applyLineStyle(style);
+  applyLineStyleVia(style);
 }
 
 function insertCodeBlock() {
@@ -1869,13 +2054,26 @@ async function callWritingAgent(systemExtra: string, userContent: string): Promi
 }
 
 async function polishSelection() {
-  const el = editorRef.value;
-  if (!el) return;
-  const start = el.selectionStart;
-  const end = el.selectionEnd;
-  if (start === end) {
-    showToast("请先选中要润色的文本", "在编辑器中选中一段文字后再点击润色", "edit");
-    return;
+  let start: number;
+  let end: number;
+  let el: HTMLTextAreaElement | null = null;
+  if (showWysiwyg.value) {
+    const off = wysiwygRef.value?.getSelectionOffsets();
+    if (!off || off.end <= off.start) {
+      showToast("请先选中要润色的文本", "在编辑器中选中一段文字后再点击润色", "edit");
+      return;
+    }
+    start = off.start;
+    end = off.end;
+  } else {
+    el = editorRef.value;
+    if (!el) return;
+    start = el.selectionStart;
+    end = el.selectionEnd;
+    if (start === end) {
+      showToast("请先选中要润色的文本", "在编辑器中选中一段文字后再点击润色", "edit");
+      return;
+    }
   }
 
   const selected = markdown.value.slice(start, end);
@@ -1894,6 +2092,14 @@ async function polishSelection() {
   if (!polished) return;
 
   markdown.value = markdown.value.slice(0, start) + polished + markdown.value.slice(end);
+  if (showWysiwyg.value) {
+    nextTick(() => wysiwygRef.value?.setSelectionOffsets(start, start + polished.length));
+  } else if (el) {
+    nextTick(() => {
+      el.focus();
+      el.setSelectionRange(start, start + polished.length);
+    });
+  }
   /* Real before/after pair — this is what 修改记忆 is built from. */
   trackModification(selected, polished, undefined, { source: "ai" });
   showToast("润色完成", "已写入编辑器，并记入修改记忆", "edit");
@@ -2482,6 +2688,112 @@ function checkTextareaSelection() {
   }
 }
 
+/* ---- WYSIWYG 模式的选中浮现工具栏（与 markdown 编辑区同一套浮层 UI） ----
+   WYSIWYG 由 contenteditable 接管选区，选区变化经组件 selectionchange 事件
+   转发到这里；定位直接取选区 Range 的视口矩形（比 textarea 的镜像测量更准），
+   锚点规则与 markdown 编辑区一致：鼠标选中时跟随松开位置，键盘选区 / 滚动后
+   回退为跟随选中文字顶部。 */
+
+function onWysiwygSelectionChange() {
+  /* 只有选区确实落在编辑区内时才刷新撤销快照的光标位置（与 textarea 侧
+     仅在本编辑区持有焦点时同步一致），避免全局 selectionchange 误触覆盖。 */
+  if (wysiwygRef.value?.selectionInsideEditor()) {
+    syncTopSelection();
+  }
+  checkWysiwygSelection();
+}
+
+function checkWysiwygSelection() {
+  if (!showWysiwyg.value) return;
+  const w = wysiwygRef.value;
+  if (!w) return;
+  const inside = w.selectionInsideEditor();
+  /* 设置 / 行内 AI / 右键菜单在场时一律不浮现（与 textarea 侧同一套抑制条件）。 */
+  if (!aiSettings.selectionToolbarEnabled || inlineAiActive.value || ctxMenu.value.show || !inside) {
+    showSelectionToolbar.value = false;
+    selectionMenuOpen.value = false;
+    clearSelectionTimer();
+    return;
+  }
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.getRangeAt(0).collapsed) {
+    showSelectionToolbar.value = false;
+    selectionMenuOpen.value = false;
+    clearSelectionTimer();
+    return;
+  }
+  showSelectionToolbar.value = true;
+  resetSelectionTimer();
+  nextTick(() => positionWysiwygSelectionBar());
+}
+
+function positionWysiwygSelectionBar() {
+  const bar = selectionBarRef.value;
+  if (!bar) return;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  if (range.collapsed) return;
+  const rect = range.getBoundingClientRect();
+  if (!rect || rect.height <= 0) return;
+
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const barW = bar.offsetWidth || 320;
+  const barH = bar.offsetHeight || 44;
+  const gap = 8;
+  const margin = 6;
+
+  /* 锚点：鼠标选中时跟随松开位置；否则（键盘选区 / 滚动后）跟随选中文字顶部中线。 */
+  let anchorX = rect.left + rect.width / 2;
+  let anchorY = rect.top;
+  if (anchorByMouse && selectionMousePos.value) {
+    anchorX = selectionMousePos.value.x;
+    anchorY = selectionMousePos.value.y;
+  }
+
+  let top: number;
+  const above = anchorY - barH - gap;
+  if (above >= margin) {
+    top = above;
+  } else {
+    const below = Math.max(anchorY + gap, margin);
+    top = below + barH <= vh - margin ? below : Math.max(margin, vh - barH - margin);
+  }
+
+  const half = barW / 2;
+  let left: number;
+  if (barW + margin * 2 > vw) {
+    selectionBarCompact.value = true;
+    left = vw / 2;
+  } else {
+    selectionBarCompact.value = false;
+    left = Math.min(Math.max(anchorX, half + margin), vw - half - margin);
+  }
+
+  selectionBarPos.value = { top, left };
+}
+
+/** WYSIWYG 编辑区滚动：与 markdown 编辑区同一套阅读位置记忆，停手后落库；
+   工具栏锚点回退为跟随选中文字，并重新定位。 */
+function onWysiwygScroll() {
+  anchorByMouse = false;
+  selectionMousePos.value = null;
+  scheduleReadingPositionSave();
+  if (showSelectionToolbar.value) {
+    selectionMenuOpen.value = false;
+    nextTick(() => positionWysiwygSelectionBar());
+  }
+}
+
+/** WYSIWYG 编辑区内右键：与 markdown 编辑区弹同一套右键菜单。 */
+function onWysiwygContextMenu(payload: { x: number; y: number }) {
+  showSelectionToolbar.value = false;
+  selectionMenuOpen.value = false;
+  clearSelectionTimer();
+  ctxMenu.value = { x: payload.x, y: payload.y, show: true };
+}
+
 /* ---- Ctrl+K 行内 AI 编辑（组件 InlineAiEdit 自带浮层与快捷键） ---- */
 
 /**
@@ -2543,6 +2855,18 @@ function onTextareaMouseDown(event: MouseEvent) {
 function onDocumentMouseUp(event: MouseEvent) {
   if (!selectionDragFromEditor) return;
   selectionDragFromEditor = false;
+  if (showWysiwyg.value) {
+    /* WYSIWYG：拖拽选区的松开点经常落在编辑区之外（底部 / 预览区），这里记录
+       最终的鼠标视口坐标，让工具栏跟随到松开位置（与 textarea 侧同一套锚定）。 */
+    const sel = window.getSelection();
+    const w = wysiwygRef.value;
+    if (sel && w && sel.rangeCount > 0 && w.selectionInsideEditor() && !sel.getRangeAt(0).collapsed) {
+      selectionMousePos.value = { x: event.clientX, y: event.clientY };
+      anchorByMouse = true;
+      checkWysiwygSelection();
+    }
+    return;
+  }
   const el = editorRef.value;
   if (!el) return;
   const start = el.selectionStart;
@@ -2564,13 +2888,15 @@ function onTextareaKeyUp() {
 
 function onWindowResize() {
   if (showSelectionToolbar.value) {
-    positionSelectionBar();
+    if (showWysiwyg.value) positionWysiwygSelectionBar();
+    else positionSelectionBar();
   }
   if (selectionMenuOpen.value) {
     placeSelectionMenu();
   }
   /* 工具栏按钮位置随窗口变化，浮层跟不上就直接收起，避免菜单悬在错位处。 */
   closeToolMenus();
+  syncEditorHighlightSize();
   /* 可视高度变了，两侧末尾跑道与进度百分比都要跟着重算。 */
   refreshRunways();
   updateEditorProgress();
@@ -2858,7 +3184,19 @@ function handleGlobalMouseDown(e: MouseEvent) {
   /* 点击浮层菜单本身不收起；点击编辑区只收起菜单。 */
   if (selectionMenuRef.value && selectionMenuRef.value.contains(target)) return;
   const inBar = selectionBarRef.value ? selectionBarRef.value.contains(target) : false;
-  const inEditor = editorRef.value ? editorRef.value.contains(target) : false;
+  /* 编辑区：textarea 或 WYSIWYG 内容可编辑区都在此列。 */
+  const wysiwygEditor = showWysiwyg.value ? wysiwygRef.value?.getEditorElement() : null;
+  const inEditor = editorRef.value
+    ? editorRef.value.contains(target)
+    : wysiwygEditor
+      ? wysiwygEditor.contains(target)
+      : false;
+  /* WYSIWYG 模式下也标记「从编辑区发起的拖拽选区」，松开时好采集鼠标锚点。 */
+  if (inEditor && e.button === 0 && showWysiwyg.value) {
+    selectionDragFromEditor = true;
+    anchorByMouse = false;
+    selectionMousePos.value = null;
+  }
   if (selectionMenuOpen.value && !inBar && !inEditor) {
     selectionMenuOpen.value = false;
   }
@@ -2981,6 +3319,61 @@ function doDelete() {
   clearSelectionTimer();
 }
 
+/* ---- 工具栏动作 → WYSIWYG 桥接（与文本处理菜单同源，见顶部 wrapSelectionVia 等） ---- */
+
+async function doCutVia() {
+  if (showWysiwyg.value) {
+    const done = await wysiwygRef.value?.cutSelection();
+    if (done) {
+      showSelectionToolbar.value = false;
+      clearSelectionTimer();
+    }
+    return;
+  }
+  await doCut();
+}
+
+async function doCopyVia() {
+  if (showWysiwyg.value) {
+    await wysiwygRef.value?.copySelection();
+    showSelectionToolbar.value = false;
+    clearSelectionTimer();
+    return;
+  }
+  await doCopy();
+}
+
+async function doPasteVia() {
+  if (showWysiwyg.value) {
+    await wysiwygRef.value?.pasteSelection();
+    showSelectionToolbar.value = false;
+    clearSelectionTimer();
+    return;
+  }
+  await doPaste();
+}
+
+function doSelectAllVia() {
+  if (showWysiwyg.value) {
+    wysiwygRef.value?.selectAllEditor();
+    checkWysiwygSelection();
+    return;
+  }
+  doSelectAll();
+}
+
+function doDeleteVia() {
+  if (showWysiwyg.value) {
+    const done = wysiwygRef.value?.deleteSelection();
+    if (done) {
+      showSelectionToolbar.value = false;
+      clearSelectionTimer();
+    }
+    return;
+  }
+  doDelete();
+}
+
 /* ---------------- 选中文字浮层更多菜单：智能文本处理 ---------------- */
 
 const selectionMenuOpen = ref(false);
@@ -2995,10 +3388,18 @@ let menuSelEnd = -1;
 function toggleSelectionMenu() {
   selectionMenuOpen.value = !selectionMenuOpen.value;
   if (selectionMenuOpen.value) {
-    const el = editorRef.value;
-    if (el && typeof el.selectionStart === "number") {
-      menuSelStart = el.selectionStart;
-      menuSelEnd = el.selectionEnd;
+    if (showWysiwyg.value) {
+      const off = wysiwygRef.value?.getSelectionOffsets();
+      if (off) {
+        menuSelStart = off.start;
+        menuSelEnd = off.end;
+      }
+    } else {
+      const el = editorRef.value;
+      if (el && typeof el.selectionStart === "number") {
+        menuSelStart = el.selectionStart;
+        menuSelEnd = el.selectionEnd;
+      }
     }
     resetSelectionTimer();
     nextTick(() => placeSelectionMenu());
@@ -3051,6 +3452,33 @@ function transformSelection(transform: (sel: string) => string): boolean {
   return true;
 }
 
+/** 文本处理菜单动作的统一入口：WYSIWYG 模式转发到组件（按 markdown 偏移读写），
+    否则走 textarea 的原路径。 */
+function transformSelectionVia(transform: (sel: string) => string): boolean {
+  if (showWysiwyg.value) {
+    const w = wysiwygRef.value;
+    if (!w) return false;
+    let start = menuSelStart;
+    let end = menuSelEnd;
+    const live = w.getSelectionOffsets();
+    if (live) {
+      start = live.start;
+      end = live.end;
+    }
+    if (start < 0 || end <= start) return false;
+    const selected = markdown.value.slice(start, end);
+    const out = transform(selected);
+    if (out === selected) return false;
+    markdown.value = markdown.value.slice(0, start) + out + markdown.value.slice(end);
+    nextTick(() => {
+      w.setSelectionOffsets(start, start + out.length);
+      checkWysiwygSelection();
+    });
+    return true;
+  }
+  return transformSelection(transform);
+}
+
 function runSelectionAction(action: () => boolean) {
   const done = action();
   selectionMenuOpen.value = false;
@@ -3061,7 +3489,7 @@ function runSelectionAction(action: () => boolean) {
 /* 智能交换：把选中文字按「单个汉字/中文、英文单词、数字、标点」切成块，相邻两类
    两两互换位置，空格原位保留。中文汉字逐字作为独立块，支持汉字之间位置智能交换。 */
 function swapSelection() {
-  return transformSelection((sel) => {
+  return transformSelectionVia((sel) => {
     const toks: string[] = [];
     const kinds: string[] = [];
     let i = 0;
@@ -3103,7 +3531,7 @@ function swapSelection() {
 
 /* 英文大小写整体切换：全大写 ⇄ 小写（仅作用于英文字母）。 */
 function swapEnglishCase() {
-  return transformSelection((sel) => {
+  return transformSelectionVia((sel) => {
     const letters = sel.match(/[A-Za-z]/g) ?? [];
     if (letters.length === 0) return sel;
     const allUpper = letters.every((c) => c === c.toUpperCase());
@@ -3113,7 +3541,7 @@ function swapEnglishCase() {
 
 /* 英文单词首字母大小写切换：大写 ⇄ 小写，其余字母不动。 */
 function swapWordCapitals() {
-  return transformSelection((sel) => {
+  return transformSelectionVia((sel) => {
     const words = sel.match(/[A-Za-z]+/g) ?? [];
     if (words.length === 0) return sel;
     const allCapped = words.every((w) => /[A-Z]/.test(w[0]));
@@ -3126,7 +3554,7 @@ function swapWordCapitals() {
 /* 智能引号：把半角直引号替换为成对弯引号（开闭按前后语境判定）；
    若选中文字中没有直引号，则自动在选中文字两侧加上智能双引号 “…” 。 */
 function smartQuotesSelection() {
-  return transformSelection((sel) => {
+  return transformSelectionVia((sel) => {
     let hasStraight = false;
     for (const ch of sel) {
       if (ch === '"' || ch === "'") {
@@ -3156,7 +3584,7 @@ function smartQuotesSelection() {
 /* 智能空格：中文句子、段落中的英文单词或字母与左右两侧的中文汉字之间自动补空格，
    标点符号、数字及其他符号不需要空格处理。 */
 function smartSpacesSelection() {
-  return transformSelection((sel) => {
+  return transformSelectionVia((sel) => {
     if (!/[A-Za-z]/.test(sel)) return sel;
     const isChinese = (ch?: string) => ch ? /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/.test(ch) : false;
     let out = "";
@@ -3218,6 +3646,15 @@ onMounted(() => {
   document.addEventListener("selectionchange", onEditorSelectionChange);
   window.addEventListener("resize", onWindowResize);
   window.addEventListener("beforeunload", onBeforeUnload);
+  /* 覆盖层内容变化后同步一次宽度（对齐 textarea 内容宽，含滚动条扣除）。
+     不能放在 setup 里监听：highlightedEditorHtml 会连锁求值 revisionMarks，
+     而 revisionEnabled 声明在它之后，setup 阶段求值会踩到未初始化报错。 */
+  watch(
+    () => highlightedEditorHtml.value,
+    () => {
+      nextTick(syncEditorHighlightSize);
+    },
+  );
   ensureLocalFonts();
   refreshInsights();
   /* 首次进入（含应用重启）恢复上次的阅读位置；文档页此刻可能还被 v-show
@@ -3229,6 +3666,7 @@ onMounted(() => {
     refreshRunways();
     updateEditorProgress();
     updatePreviewProgress();
+    syncEditorHighlightSize();
   });
   /* 文档界面：登记 AI 回复拖入编辑区的落点（嵌入式渲染不参与）。 */
   if (!props.embedded) registerDocEditorTarget(docDropTarget);
@@ -3302,8 +3740,17 @@ onBeforeUnmount(() => {
         <div class="view-switch">
           <button
             class="view-btn"
-            :class="{ active: showEditor }"
-            :disabled="showEditor && !showPreview"
+            :class="{ active: showWysiwyg }"
+            title="Markdown 所见即所得 (WYSIWYG) 编辑"
+            @click="toggleWysiwyg"
+          >
+            <FilePenLine :size="14" :stroke-width="1.8" />
+            所见即所得
+          </button>
+          <button
+            class="view-btn"
+            :class="{ active: !showWysiwyg && showEditor }"
+            :disabled="!showWysiwyg && showEditor && !showPreview"
             title="Markdown 编辑"
             @click="toggleEditor"
           >
@@ -3312,8 +3759,8 @@ onBeforeUnmount(() => {
           </button>
           <button
             class="view-btn"
-            :class="{ active: showPreview }"
-            :disabled="showPreview && !showEditor"
+            :class="{ active: !showWysiwyg && showPreview }"
+            :disabled="!showWysiwyg && showPreview && !showEditor"
             title="预览"
             @click="togglePreview"
           >
@@ -3323,12 +3770,14 @@ onBeforeUnmount(() => {
           <button
             class="view-btn view-btn-swap"
             :class="{ active: panesSwapped }"
-            :disabled="!isSplit"
+            :disabled="!isSplit || showWysiwyg"
             :aria-pressed="panesSwapped"
             :title="
-              isSplit
-                ? (panesSwapped ? '恢复布局：markdown 在左、预览在右' : '左右对调：预览在左、markdown 在右')
-                : '左右对调：需同时显示 markdown 与预览'
+              showWysiwyg
+                ? '左右对调：所见即所得模式下不可用'
+                : isSplit
+                  ? (panesSwapped ? '恢复布局：markdown 在左、预览在右' : '左右对调：预览在左、markdown 在右')
+                  : '左右对调：需同时显示 markdown 与预览'
             "
             @click="toggleSwapPanes"
           >
@@ -3374,10 +3823,10 @@ onBeforeUnmount(() => {
           <Trash2 :size="15" :stroke-width="1.8" />
         </button>
         <span class="toolbar-divider" />
-        <button class="format-btn" title="加粗 (Ctrl+B)" @click="wrapSelection('**', '**', '加粗文本')">
+        <button class="format-btn" title="加粗 (Ctrl+B)" @click="wrapSelectionVia('**', '**', '加粗文本')">
           <Bold :size="15" :stroke-width="1.8" />
         </button>
-        <button class="format-btn" title="斜体 (Ctrl+I)" @click="wrapSelection('*', '*', '斜体文本')">
+        <button class="format-btn" title="斜体 (Ctrl+I)" @click="wrapSelectionVia('*', '*', '斜体文本')">
           <Italic :size="15" :stroke-width="1.8" />
         </button>
         <button
@@ -3402,13 +3851,13 @@ onBeforeUnmount(() => {
           <List :size="15" :stroke-width="1.8" />
           <ChevronDown class="menu-caret" :size="9" :stroke-width="2.6" />
         </button>
-        <button class="format-btn" title="引用 (Ctrl+Shift+Q)" @click="applyLineStyle('quote')">
+        <button class="format-btn" title="引用 (Ctrl+Shift+Q)" @click="applyLineStyleVia('quote')">
           <Quote :size="15" :stroke-width="1.8" />
         </button>
-        <button class="format-btn" title="代码块 (Ctrl+Shift+C)" @click="insertCodeBlock()">
+        <button class="format-btn" title="代码块 (Ctrl+Shift+C)" @click="insertCodeBlockVia()">
           <SquareCode :size="15" :stroke-width="1.8" />
         </button>
-        <button class="format-btn" title="链接 (Ctrl+L)" @click="insertLink()">
+        <button class="format-btn" title="链接 (Ctrl+L)" @click="insertLinkVia()">
           <LinkIcon :size="15" :stroke-width="1.8" />
         </button>
         <span class="toolbar-divider" />
@@ -3708,9 +4157,37 @@ onBeforeUnmount(() => {
           swapped: isSplit && panesSwapped,
           'editor-only': effectiveShowEditor && !effectiveShowPreview,
           'preview-only': !effectiveShowEditor && effectiveShowPreview,
+          'wysiwyg-only': showWysiwyg,
         }"
         :style="splitRatioStyle"
       >
+        <!-- Markdown 所见即所得（WYSIWYG）编辑界面 -->
+        <MarkdownWysiwyg
+          ref="wysiwygRef"
+          v-if="showWysiwyg"
+          v-model="markdown"
+          :font-size="editorFontSize"
+          :font-family="editorFontStack"
+          :line-height="editorLineHeight"
+          :margin-x="editorMarginX"
+          :margin-y="editorMarginY"
+          :file-id="fileIdForSlot"
+          :ring-slot="ringSlotBase + ':wysiwyg'"
+          :zen-mode="props.zenMode"
+          :spotlight-enabled="spotlightEnabled"
+          :single-editor="props.singleEditor"
+          :embedded="props.embedded"
+          :find-highlight="findHighlight"
+          @toggleZen="handleToggleZen"
+          @toggleSpotlight="handleToggleSpotlight"
+          @undo="undo"
+          @redo="redo"
+          @selectionchange="onWysiwygSelectionChange"
+          @find="openFind"
+          @contextmenu="onWysiwygContextMenu"
+          @scroll="onWysiwygScroll"
+        />
+
         <div v-if="effectiveShowEditor" class="editor-pane">
           <div v-if="props.zenMode === 'off'" class="read-progress" aria-hidden="true">
             <span
@@ -3841,96 +4318,6 @@ onBeforeUnmount(() => {
               :file-id="fileIdForSlot"
               @opened="onRevisionOpened"
             />
-            <!-- 浮动工具栏 Teleport 到 body，用视口坐标定位，保证整条完整单排显示，
-                 不受编辑区 overflow 裁剪，也不会在窄栏里竖排换行。 -->
-            <Teleport to="body">
-              <Transition name="fade">
-                <div
-                  v-if="showSelectionToolbar && !selectionMenuOpen"
-                  ref="selectionBarRef"
-                  class="floating-selection-bar"
-                  :class="{ compact: selectionBarCompact }"
-                  :style="{ top: selectionBarPos.top + 'px', left: selectionBarPos.left + 'px' }"
-                  @mousedown.prevent.stop
-                >
-                <button class="selection-bar-btn" title="剪切" @click="doCut">
-                  <span>剪切</span>
-                </button>
-                <button class="selection-bar-btn" title="复制" @click="doCopy">
-                  <span>复制</span>
-                </button>
-                <button class="selection-bar-btn" title="粘贴" @click="doPaste">
-                  <span>粘贴</span>
-                </button>
-                <button class="selection-bar-btn" title="全选" @click="doSelectAll">
-                  <span>全选</span>
-                </button>
-                <button class="selection-bar-btn danger" title="删除" @click="doDelete">
-                  <span>删除</span>
-                </button>
-                <button class="selection-bar-btn menu" title="更多文本处理" @click.stop="toggleSelectionMenu">
-                  <MoreVertical :size="14" :stroke-width="1.9" />
-                </button>
-              </div>
-            </Transition>
-            </Teleport>
-            <!-- 更多文本处理菜单：默认贴在工具条下方，底部返回箭头回到工具条。 -->
-            <Teleport to="body">
-              <Transition name="fade">
-                <div
-                  v-if="showSelectionToolbar && selectionMenuOpen"
-                  ref="selectionMenuRef"
-                  class="selection-more-menu"
-                  :style="{ top: selectionMenuPos.top + 'px', left: selectionMenuPos.left + 'px' }"
-                  @mousedown.prevent.stop
-                >
-                  <button
-                    class="selection-more-item"
-                    title="智能交换选中文字中：中文、英文（整词或字母）与标点的彼此位置"
-                    @click="runSelectionAction(swapSelection)"
-                  >
-                    <ArrowRightLeft :size="14" :stroke-width="1.8" />
-                    <span>智能交换</span>
-                  </button>
-                  <button
-                    class="selection-more-item"
-                    title="英文大小写整体切换（全大写 ⇄ 小写）"
-                    @click="runSelectionAction(swapEnglishCase)"
-                  >
-                    <span class="menu-case-glyph caps">Aa</span>
-                    <span>英文大小写</span>
-                  </button>
-                  <button
-                    class="selection-more-item"
-                    title="英文单词首字母大小写切换（首字母大写 ⇄ 小写）"
-                    @click="runSelectionAction(swapWordCapitals)"
-                  >
-                    <span class="menu-case-glyph">Aa</span>
-                    <span>首字母大小写</span>
-                  </button>
-                  <button
-                    class="selection-more-item"
-                    title="智能引号替换：把半角直引号替换为成对弯引号（中文/英文双引号）"
-                    @click="runSelectionAction(smartQuotesSelection)"
-                  >
-                    <Quote :size="14" :stroke-width="1.8" />
-                    <span>智能引号</span>
-                  </button>
-                  <button
-                    class="selection-more-item"
-                    title="智能空格：英文单词与相邻文字之间自动补空格，让中英文混排自然留白"
-                    @click="runSelectionAction(smartSpacesSelection)"
-                  >
-                    <span class="menu-space-glyph">&nbsp;空&nbsp;</span>
-                    <span>智能空格</span>
-                  </button>
-                  <button class="selection-more-back" title="返回浮现工具栏" @click="closeSelectionMenu">
-                    <ArrowLeft :size="14" :stroke-width="1.8" />
-                    <span>返回</span>
-                  </button>
-                </div>
-              </Transition>
-            </Teleport>
           </div>
         </div>
 
@@ -4026,6 +4413,99 @@ onBeforeUnmount(() => {
       </div>
     </div>
     </div>
+
+    <!-- 选中文字浮现工具栏：Teleport 到 body，用视口坐标定位。
+         挂在 DocumentViewer 根级（而非 markdown 编辑区内部）—— WYSIWYG 模式下
+         编辑区窗格整块隐藏，若把浮层嵌在它里面，工具栏在所见即所得里就永远
+         渲染不出来。markdown 与 WYSIWYG 两种编辑区共用这一份浮层与操作。 -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div
+          v-if="showSelectionToolbar && !selectionMenuOpen"
+          ref="selectionBarRef"
+          class="floating-selection-bar"
+          :class="{ compact: selectionBarCompact }"
+          :style="{ top: selectionBarPos.top + 'px', left: selectionBarPos.left + 'px' }"
+          @mousedown.prevent.stop
+        >
+          <button class="selection-bar-btn" title="剪切" @click="doCutVia">
+            <span>剪切</span>
+          </button>
+          <button class="selection-bar-btn" title="复制" @click="doCopyVia">
+            <span>复制</span>
+          </button>
+          <button class="selection-bar-btn" title="粘贴" @click="doPasteVia">
+            <span>粘贴</span>
+          </button>
+          <button class="selection-bar-btn" title="全选" @click="doSelectAllVia">
+            <span>全选</span>
+          </button>
+          <button class="selection-bar-btn danger" title="删除" @click="doDeleteVia">
+            <span>删除</span>
+          </button>
+          <button class="selection-bar-btn menu" title="更多文本处理" @click.stop="toggleSelectionMenu">
+            <MoreVertical :size="14" :stroke-width="1.9" />
+          </button>
+        </div>
+      </Transition>
+    </Teleport>
+    <!-- 更多文本处理菜单：默认贴在工具条下方，底部返回箭头回到工具条。 -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div
+          v-if="showSelectionToolbar && selectionMenuOpen"
+          ref="selectionMenuRef"
+          class="selection-more-menu"
+          :style="{ top: selectionMenuPos.top + 'px', left: selectionMenuPos.left + 'px' }"
+          @mousedown.prevent.stop
+        >
+          <button
+            class="selection-more-item"
+            title="智能交换选中文字中：中文、英文（整词或字母）与标点的彼此位置"
+            @click="runSelectionAction(swapSelection)"
+          >
+            <ArrowRightLeft :size="14" :stroke-width="1.8" />
+            <span>智能交换</span>
+          </button>
+          <button
+            class="selection-more-item"
+            title="英文大小写整体切换（全大写 ⇄ 小写）"
+            @click="runSelectionAction(swapEnglishCase)"
+          >
+            <span class="menu-case-glyph caps">Aa</span>
+            <span>英文大小写</span>
+          </button>
+          <button
+            class="selection-more-item"
+            title="英文单词首字母大小写切换（首字母大写 ⇄ 小写）"
+            @click="runSelectionAction(swapWordCapitals)"
+          >
+            <span class="menu-case-glyph">Aa</span>
+            <span>首字母大小写</span>
+          </button>
+          <button
+            class="selection-more-item"
+            title="智能引号替换：把半角直引号替换为成对弯引号（中文/英文双引号）"
+            @click="runSelectionAction(smartQuotesSelection)"
+          >
+            <Quote :size="14" :stroke-width="1.8" />
+            <span>智能引号</span>
+          </button>
+          <button
+            class="selection-more-item"
+            title="智能空格：英文单词与相邻文字之间自动补空格，让中英文混排自然留白"
+            @click="runSelectionAction(smartSpacesSelection)"
+          >
+            <span class="menu-space-glyph">&nbsp;空&nbsp;</span>
+            <span>智能空格</span>
+          </button>
+          <button class="selection-more-back" title="返回浮现工具栏" @click="closeSelectionMenu">
+            <ArrowLeft :size="14" :stroke-width="1.8" />
+            <span>返回</span>
+          </button>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- 右键菜单 -->
     <Teleport to="body">
@@ -4920,6 +5400,12 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+.panes.wysiwyg-only :deep(.wysiwyg-pane) {
+  width: 100%;
+  max-width: none;
+  flex: 1 1 100%;
+}
+
 /* 左右对调：只改 flex 次序，两个窗格的 DOM、宽度占比与内部逻辑都不变。
    --split-ratio 仍是 markdown 侧的占比，对调后它落在右边。 */
 .panes.swapped .preview-pane {
@@ -5066,7 +5552,10 @@ onBeforeUnmount(() => {
 
 .block-drag-handle {
   position: absolute;
-  left: 2px;
+  /* 与 WYSIWYG 的拖拽手柄同一位置语言：贴紧正文列左侧的留白里，而不是钉在
+     窗格最左缘。--ed-pad-x 是正文列起点（含居中），减掉约 38px 的留白宽度即
+     WYSIWYG 纸面里手柄到正文的间距；窄栏时退回 2px 兜底保证可点。 */
+  left: max(2px, calc(var(--ed-pad-x, 22px) - 38px));
   z-index: 5;
   display: inline-flex;
   align-items: center;
@@ -5412,6 +5901,9 @@ onBeforeUnmount(() => {
   overflow-wrap: break-word;
   line-height: var(--ed-line-height-px, calc(var(--ed-font-size, 16px) * var(--ed-line-height, 1.75)));
   tab-size: 2;
+  /* 与 .editor-textarea 同一档字距，否则每个字符多出 0.004em 的累进间距，
+     命中底色会逐字向右漂、长行换行点错位，越到文末偏得越厉害。 */
+  letter-spacing: -0.004em;
   color: transparent;
   pointer-events: none;
   will-change: transform;
@@ -5613,12 +6105,13 @@ onBeforeUnmount(() => {
   background: var(--reading-surface);
 }
 
-/* 阅读纸面：正文宽度收在 --reading-measure 内并居中，行长过长会显著拖慢阅读。
+/* 阅读纸面：正文宽度与 markdown 编辑区一致 —— 不再收窄纸面，
+   文字列由对称的 --ed-pad-x 居中（宽窗时收在 --reading-measure 内）。
    上下留白给足，让最后一段也能滚到视线舒服的位置。 */
 .paper-card {
   background: transparent;
   width: 100%;
-  max-width: var(--reading-measure);
+  max-width: none;
   min-height: 100%;
   box-sizing: border-box;
   padding: 26px 40px 96px;
@@ -5862,7 +6355,12 @@ onBeforeUnmount(() => {
   transform: translateX(-50%) translateY(16px);
 }
 
-/* ---- 背景网格线（仅对编辑区生效：.editor-textarea 与 .editor-layer） ---- */
+/* ---- 背景网格线（仅对编辑区生效：.editor-textarea 与 .editor-layer） ----
+   行线宽度收在正文列内（与 WYSIWYG 纸面网格同一宽度语言）：
+   用 background-origin: content-box 把网格锚到内容盒上 —— 内容盒本来就
+   被 --ed-pad-x 左右缩进包住正文，pos/size 里的 % 以内容盒为准，
+   左右边界与文字列精确对齐。此前把 --ed-pad-x（为 padding 上下文设计的
+   百分比值）直接搬进 background-position/size，% 语义不同导致网格偏左。 */
 .grid-line-solid .editor-textarea,
 .grid-line-solid .editor-layer {
   background-image: linear-gradient(
@@ -5870,8 +6368,9 @@ onBeforeUnmount(() => {
     transparent calc(100% - 1px),
     var(--grid-line-color, rgba(140, 140, 140, 0.35)) 1px
   );
+  background-origin: content-box;
   background-size: 100% var(--ed-line-height-px, 28px);
-  background-position: 0 var(--ed-pad-y, 26px);
+  background-position: 0 0;
   background-attachment: local;
   background-repeat: repeat-y;
 }
@@ -5879,8 +6378,9 @@ onBeforeUnmount(() => {
 .grid-line-dashed .editor-textarea,
 .grid-line-dashed .editor-layer {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25' overflow='visible'%3E%3Cline x1='0' y1='calc(100%25 - 0.5px)' x2='100%25' y2='calc(100%25 - 0.5px)' stroke='rgba(120, 120, 120, 0.55)' stroke-width='1' stroke-dasharray='6 3' shape-rendering='crispEdges'/%3E%3C/svg%3E");
+  background-origin: content-box;
   background-size: 100% var(--ed-line-height-px, 28px);
-  background-position: 0 var(--ed-pad-y, 26px);
+  background-position: 0 0;
   background-attachment: local;
   background-repeat: repeat-y;
 }
@@ -5888,8 +6388,9 @@ onBeforeUnmount(() => {
 .grid-line-dotted .editor-textarea,
 .grid-line-dotted .editor-layer {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25' overflow='visible'%3E%3Cline x1='0' y1='calc(100%25 - 0.5px)' x2='100%25' y2='calc(100%25 - 0.5px)' stroke='rgba(110, 110, 110, 0.65)' stroke-width='1.2' stroke-dasharray='2 3' shape-rendering='crispEdges'/%3E%3C/svg%3E");
+  background-origin: content-box;
   background-size: 100% var(--ed-line-height-px, 28px);
-  background-position: 0 var(--ed-pad-y, 26px);
+  background-position: 0 0;
   background-attachment: local;
   background-repeat: repeat-y;
 }

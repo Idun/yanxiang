@@ -250,6 +250,7 @@ async function backupData() {
       url: aiSettings.url,
       model: aiSettings.model,
       auditorModel: aiSettings.auditorModel,
+      readerModel: aiSettings.readerModel,
     },
     document: docStore.markdown,
   };

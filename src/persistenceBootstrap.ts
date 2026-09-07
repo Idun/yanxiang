@@ -65,6 +65,7 @@ import {
 } from "./persistence";
 import { WRITER_AGENT_PROMPT } from "./prompts/writerAgent";
 import { AUDITOR_AGENT_PROMPT } from "./prompts/auditorAgent";
+import { READER_AGENT_PROMPT } from "./prompts/readerAgent";
 import { REFINE_AGENT_PROMPT } from "./prompts/refineAgent";
 import { CHAT_AGENT_PROMPT } from "./prompts/chatAgent";
 
@@ -97,6 +98,7 @@ export async function initPersistence() {
   if (settings.url) aiSettings.url = settings.url;
   if (settings.model) aiSettings.model = settings.model;
   if (settings.auditorModel) aiSettings.auditorModel = settings.auditorModel;
+  if (settings.readerModel) aiSettings.readerModel = settings.readerModel;
   if (settings.apiKey) aiSettings.apiKey = settings.apiKey;
   /* Re-sync prompts: when the bundled prompt version is bumped, ignore any
      previously-stored prompt texts so the settings panel shows the latest ones. */
@@ -108,6 +110,10 @@ export async function initPersistence() {
     settings.auditorPrompt?.trim()
       ? settings.auditorPrompt
       : AUDITOR_AGENT_PROMPT;
+  aiSettings.readerPrompt =
+    settings.readerPrompt?.trim()
+      ? settings.readerPrompt
+      : READER_AGENT_PROMPT;
   aiSettings.refinePrompt =
     settings.refinePrompt?.trim()
       ? settings.refinePrompt
@@ -119,6 +125,7 @@ export async function initPersistence() {
   if (settings.promptSyncVersion !== String(PROMPT_SYNC_VERSION)) {
     aiSettings.writerPrompt = WRITER_AGENT_PROMPT;
     aiSettings.auditorPrompt = AUDITOR_AGENT_PROMPT;
+    aiSettings.readerPrompt = READER_AGENT_PROMPT;
     aiSettings.refinePrompt = REFINE_AGENT_PROMPT;
     aiSettings.chatPrompt = CHAT_AGENT_PROMPT;
   }
@@ -187,6 +194,7 @@ export async function initPersistence() {
     }
   }
   if (settings.auditorModel) aiSettings.auditorModel = settings.auditorModel;
+  if (settings.readerModel) aiSettings.readerModel = settings.readerModel;
   /* Restore saved provider cards, then re-apply the active one so the live
      settings (key/url/model) match the card the user last used. */
   if (settings.providerProfiles) {
@@ -222,6 +230,13 @@ export async function initPersistence() {
       /* keep default */
     }
   }
+  if (settings.readerKnowledge) {
+    try {
+      aiSettings.readerKnowledge = JSON.parse(settings.readerKnowledge);
+    } catch {
+      /* keep default */
+    }
+  }
   if (settings.chatKnowledgeAutoLoad !== undefined) {
     aiSettings.chatKnowledgeAutoLoad = settings.chatKnowledgeAutoLoad === "true";
   }
@@ -230,6 +245,9 @@ export async function initPersistence() {
   }
   if (settings.auditorKnowledgeAutoLoad !== undefined) {
     aiSettings.auditorKnowledgeAutoLoad = settings.auditorKnowledgeAutoLoad === "true";
+  }
+  if (settings.readerKnowledgeAutoLoad !== undefined) {
+    aiSettings.readerKnowledgeAutoLoad = settings.readerKnowledgeAutoLoad === "true";
   }
   if (settings.webSearchEnabled !== undefined) {
     aiSettings.webSearchEnabled = settings.webSearchEnabled === "true";
@@ -240,10 +258,11 @@ export async function initPersistence() {
   if (settings.thinkingLevel === "off" || settings.thinkingLevel === "auto" || settings.thinkingLevel === "standard") {
     aiSettings.thinkingLevel = settings.thinkingLevel;
   }
-  /* Sync bundled knowledge with the auto-load flags (chat/writer/auditor). */
+  /* Sync bundled knowledge with the auto-load flags (chat/writer/auditor/reader). */
   applyKnowledgeAutoLoad("chat");
   applyKnowledgeAutoLoad("writer");
   applyKnowledgeAutoLoad("auditor");
+  applyKnowledgeAutoLoad("reader");
 
   /* Restore appearance (font + theme) and push it into the CSS variables. */
   if (settings.appFont) {
@@ -594,6 +613,7 @@ export async function initPersistence() {
       let chatKnowledge: string;
       let writerKnowledge: string;
       let auditorKnowledge: string;
+      let readerKnowledge: string;
       let providerProfiles: string;
       try {
         chatKnowledge = JSON.stringify(s.chatKnowledge);
@@ -611,6 +631,11 @@ export async function initPersistence() {
         auditorKnowledge = "[]";
       }
       try {
+        readerKnowledge = JSON.stringify(s.readerKnowledge);
+      } catch {
+        readerKnowledge = "[]";
+      }
+      try {
         providerProfiles = JSON.stringify(s.providerProfiles);
       } catch {
         providerProfiles = "[]";
@@ -621,18 +646,22 @@ export async function initPersistence() {
         { key: "url", value: s.url },
         { key: "model", value: s.model },
         { key: "auditorModel", value: s.auditorModel },
+        { key: "readerModel", value: s.readerModel || "" },
         { key: "apiKey", value: s.apiKey },
         { key: "providerProfiles", value: providerProfiles },
         { key: "activeProfileId", value: s.activeProfileId },
         { key: "writerPrompt", value: s.writerPrompt },
         { key: "auditorPrompt", value: s.auditorPrompt },
+        { key: "readerPrompt", value: s.readerPrompt },
         { key: "refinePrompt", value: s.refinePrompt },
         { key: "chatPrompt", value: s.chatPrompt },
         { key: "writerKnowledge", value: writerKnowledge },
         { key: "auditorKnowledge", value: auditorKnowledge },
+        { key: "readerKnowledge", value: readerKnowledge },
         { key: "chatKnowledge", value: chatKnowledge },
         { key: "writerKnowledgeAutoLoad", value: String(s.writerKnowledgeAutoLoad) },
         { key: "auditorKnowledgeAutoLoad", value: String(s.auditorKnowledgeAutoLoad) },
+        { key: "readerKnowledgeAutoLoad", value: String(s.readerKnowledgeAutoLoad) },
         { key: "chatKnowledgeAutoLoad", value: String(s.chatKnowledgeAutoLoad) },
         { key: "promptSyncVersion", value: String(PROMPT_SYNC_VERSION) },
         { key: "webSearchEnabled", value: String(s.webSearchEnabled) },

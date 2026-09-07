@@ -2,6 +2,7 @@
  * 文档阅读停留位置的记忆。
  *
  * 以「文档条目 id」为键各记一份：编辑区与预览区的滚动位置分别存，
+ * 所见即所得（WYSIWYG）编辑区再各存一份，
  * 下次打开（切回该文档 / 重启应用）时回到上次读到的正文位置，
  * 而不是每次都从头开始。
  *
@@ -24,6 +25,10 @@ export interface DocReadingPosition {
   previewTop: number;
   /** 预览区滚动比例 0~1。 */
   previewRatio: number;
+  /** 所见即所得（WYSIWYG）编辑区 scrollTop（px）。 */
+  wysiwygTop: number;
+  /** 所见即所得（WYSIWYG）编辑区滚动比例 0~1。 */
+  wysiwygRatio: number;
   /** 记录时的正文字符数，用来判断能否直接用绝对像素。 */
   length: number;
   updatedAt: number;
@@ -60,6 +65,8 @@ export function setReadingPosition(
     editorRatio: clamp01(num(patch.editorRatio, prev?.editorRatio ?? 0)),
     previewTop: num(patch.previewTop, prev?.previewTop ?? 0),
     previewRatio: clamp01(num(patch.previewRatio, prev?.previewRatio ?? 0)),
+    wysiwygTop: num(patch.wysiwygTop, prev?.wysiwygTop ?? 0),
+    wysiwygRatio: clamp01(num(patch.wysiwygRatio, prev?.wysiwygRatio ?? 0)),
     length: num(patch.length, prev?.length ?? 0),
     updatedAt: Date.now(),
   };
@@ -68,8 +75,10 @@ export function setReadingPosition(
   if (
     next.editorTop <= 0 &&
     next.previewTop <= 0 &&
+    next.wysiwygTop <= 0 &&
     next.editorRatio <= 0 &&
-    next.previewRatio <= 0
+    next.previewRatio <= 0 &&
+    next.wysiwygRatio <= 0
   ) {
     if (prev) delete readingPositionStore.positions[fileId];
     return;
@@ -112,13 +121,15 @@ function pruneEntries(): void {
  */
 export function resolveScrollTop(
   saved: DocReadingPosition | undefined,
-  pane: "editor" | "preview",
+  pane: "editor" | "preview" | "wysiwyg",
   max: number,
   currentLength: number,
 ): number {
   if (!saved || max <= 0) return 0;
-  const top = pane === "editor" ? saved.editorTop : saved.previewTop;
-  const ratio = pane === "editor" ? saved.editorRatio : saved.previewRatio;
+  const top =
+    pane === "editor" ? saved.editorTop : pane === "preview" ? saved.previewTop : saved.wysiwygTop;
+  const ratio =
+    pane === "editor" ? saved.editorRatio : pane === "preview" ? saved.previewRatio : saved.wysiwygRatio;
   /* 正文没变过 → 绝对像素最准；变过 → 按比例落点。 */
   const raw = saved.length === currentLength ? top : ratio * max;
   return Math.min(max, Math.max(0, Math.round(raw)));
@@ -143,6 +154,8 @@ export function importReadingPositions(raw: unknown): void {
       editorRatio: clamp01(num(v.editorRatio)),
       previewTop: num(v.previewTop),
       previewRatio: clamp01(num(v.previewRatio)),
+      wysiwygTop: num(v.wysiwygTop),
+      wysiwygRatio: clamp01(num(v.wysiwygRatio)),
       length: num(v.length),
       updatedAt: num(v.updatedAt, Date.now()),
     };

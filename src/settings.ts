@@ -2,10 +2,12 @@
 import { CHAT_AGENT_PROMPT } from "./prompts/chatAgent";
 import { WRITER_AGENT_PROMPT } from "./prompts/writerAgent";
 import { AUDITOR_AGENT_PROMPT } from "./prompts/auditorAgent";
+import { READER_AGENT_PROMPT } from "./prompts/readerAgent";
 import { REFINE_AGENT_PROMPT } from "./prompts/refineAgent";
 import {
   BUNDLED_AUDITOR_KNOWLEDGE,
   BUNDLED_CHAT_KNOWLEDGE,
+  BUNDLED_READER_KNOWLEDGE,
   BUNDLED_WRITER_KNOWLEDGE,
 } from "./prompts/knowledgeDefaults";
 
@@ -97,6 +99,7 @@ export interface ProviderProfile {
   url: string;
   model: string;
   auditorModel: string;
+  readerModel?: string;
   models: string[];
   /** Custom display name for OpenAICompatible-style providers. */
   name?: string;
@@ -270,6 +273,7 @@ export const aiSettings = reactive({
   url: "https://api.openai.com/v1",
   model: "",
   auditorModel: "",
+  readerModel: "",
   /* Enabled models shown in the various model dropdowns (added via 「+」). */
   models: [] as string[],
   /* Full model pool fetched from the endpoint (drives the settings dropdown). */
@@ -281,6 +285,7 @@ export const aiSettings = reactive({
   activeProfileId: "" as string,
   writerPrompt: WRITER_AGENT_PROMPT,
   auditorPrompt: AUDITOR_AGENT_PROMPT,
+  readerPrompt: READER_AGENT_PROMPT,
   refinePrompt: REFINE_AGENT_PROMPT,
   /* 「对话」标签页的提示词与知识项（设置面板 → 对话 选项卡）。 */
   chatPrompt: CHAT_AGENT_PROMPT,
@@ -288,8 +293,10 @@ export const aiSettings = reactive({
   chatKnowledgeAutoLoad: true,
   writerKnowledge: [] as KnowledgeFile[],
   auditorKnowledge: [] as KnowledgeFile[],
+  readerKnowledge: [] as KnowledgeFile[],
   writerKnowledgeAutoLoad: true,
   auditorKnowledgeAutoLoad: true,
+  readerKnowledgeAutoLoad: true,
   /* Web Search & Thinking Level Settings */
   webSearchEnabled: false,
   webSearchEngine: "bing" as "bing" | "google",
@@ -352,6 +359,7 @@ export function applyProvider(provider: string) {
   aiSettings.models = [];
   aiSettings.model = "";
   aiSettings.auditorModel = "";
+  aiSettings.readerModel = "";
   aiSettings.url = providerUrls[provider] ?? "";
   aiSettings.apiType = defaultApiTypeFor(provider);
   aiSettings.providerName = "";
@@ -533,6 +541,7 @@ function draftProfile(): Omit<ProviderProfile, "id" | "createdAt"> {
     url: aiSettings.url,
     model: aiSettings.model,
     auditorModel: aiSettings.auditorModel,
+    readerModel: aiSettings.readerModel,
     models: [...aiSettings.models],
     name: aiSettings.providerName.trim() || undefined,
   };
@@ -590,6 +599,7 @@ export function activateProviderProfile(id: string): boolean {
   aiSettings.providerName = profile.name ?? "";
   aiSettings.model = profile.model;
   aiSettings.auditorModel = profile.auditorModel || profile.model;
+  aiSettings.readerModel = profile.readerModel || profile.model;
   aiSettings.activeProfileId = profile.id;
   return true;
 }
@@ -609,7 +619,7 @@ export function renameProviderProfile(id: string, label: string): void {
 }
 
 /** Set the model a saved card should use, without switching to it. */
-export function setProfileModel(id: string, model: string, which: "model" | "auditorModel" = "model"): void {
+export function setProfileModel(id: string, model: string, which: "model" | "auditorModel" | "readerModel" = "model"): void {
   const profile = aiSettings.providerProfiles.find((p) => p.id === id);
   if (!profile) return;
   profile[which] = model;
@@ -619,7 +629,7 @@ export function setProfileModel(id: string, model: string, which: "model" | "aud
 }
 
 /** 知识项作用域：对应设置面板里带知识项的选项卡。 */
-export type KnowledgeType = "chat" | "writer" | "auditor";
+export type KnowledgeType = "chat" | "writer" | "auditor" | "reader";
 
 /**
  * Bring the knowledge list in sync with the auto-load flag.
@@ -632,19 +642,25 @@ export function applyKnowledgeAutoLoad(type: KnowledgeType) {
       ? aiSettings.chatKnowledgeAutoLoad
       : type === "writer"
       ? aiSettings.writerKnowledgeAutoLoad
-      : aiSettings.auditorKnowledgeAutoLoad;
+      : type === "auditor"
+      ? aiSettings.auditorKnowledgeAutoLoad
+      : aiSettings.readerKnowledgeAutoLoad;
   const list =
     type === "chat"
       ? aiSettings.chatKnowledge
       : type === "writer"
       ? aiSettings.writerKnowledge
-      : aiSettings.auditorKnowledge;
+      : type === "auditor"
+      ? aiSettings.auditorKnowledge
+      : aiSettings.readerKnowledge;
   const defaults =
     type === "chat"
       ? BUNDLED_CHAT_KNOWLEDGE
       : type === "writer"
       ? BUNDLED_WRITER_KNOWLEDGE
-      : BUNDLED_AUDITOR_KNOWLEDGE;
+      : type === "auditor"
+      ? BUNDLED_AUDITOR_KNOWLEDGE
+      : BUNDLED_READER_KNOWLEDGE;
   const defaultIds = new Set(defaults.map((k) => k.id));
 
   if (enabled) {
@@ -665,6 +681,7 @@ export function applyKnowledgeAutoLoad(type: KnowledgeType) {
 export function setKnowledgeAutoLoad(type: KnowledgeType, enabled: boolean) {
   if (type === "chat") aiSettings.chatKnowledgeAutoLoad = enabled;
   else if (type === "writer") aiSettings.writerKnowledgeAutoLoad = enabled;
-  else aiSettings.auditorKnowledgeAutoLoad = enabled;
+  else if (type === "auditor") aiSettings.auditorKnowledgeAutoLoad = enabled;
+  else aiSettings.readerKnowledgeAutoLoad = enabled;
   applyKnowledgeAutoLoad(type);
 }

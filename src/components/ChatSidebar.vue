@@ -13,7 +13,10 @@ import { pulseAiDocEdit } from "../aiDocActivity";
 import { showToast } from "../insightStore";
 import { WRITER_AGENT_NAME, WRITER_AGENT_PROMPT } from "../prompts/writerAgent";
 import { AUDITOR_AGENT_NAME, AUDITOR_AGENT_PROMPT } from "../prompts/auditorAgent";
+import { READER_AGENT_NAME, READER_AGENT_PROMPT, extractReaderEvaluation } from "../prompts/readerAgent";
 import { CHAT_AGENT_PROMPT } from "../prompts/chatAgent";
+import ReaderTab from "./ReaderTab.vue";
+import ReaderResultInline from "./ReaderResultInline.vue";
 import {
   CHAT_CASUAL_GUARD,
   SLASH_COMMANDS,
@@ -132,7 +135,7 @@ const props = defineProps<{
   activeMainTab?: "home" | "docs" | "library" | "refine" | "insight";
 }>();
 
-export type SidebarTab = "chat" | "writer" | "auditor";
+export type SidebarTab = "chat" | "writer" | "auditor" | "reader";
 
 const activeSidebarTab = ref<SidebarTab>("chat");
 
@@ -233,6 +236,15 @@ const activeAuditorHistoryId = ref<number | null>(null);
 const auditorMessages = ref<ChatMessage[]>([]);
 const auditorComposerText = ref("");
 
+/* --- Decoupled States for Reader --- */
+const readerChatHistory = ref<ChatHistoryItem[]>([]);
+const activeReaderHistoryId = ref<number | null>(null);
+const readerMessages = ref<ChatMessage[]>([]);
+const readerComposerText = ref("");
+/* 「对话 / AI写作」两个页签是否参考读者评估的最新结果（用户可自由开关）。 */
+const readerRefChat = ref(false);
+const readerRefWriter = ref(false);
+
 /* --- Chat Persistence --- */
 const CHAT_STORAGE_KEY = "docintel:chat_sidebar_data";
 
@@ -245,6 +257,10 @@ function saveChatData() {
       writerChatHistory: writerChatHistory.value,
       auditorMessages: auditorMessages.value,
       auditorChatHistory: auditorChatHistory.value,
+      readerMessages: readerMessages.value,
+      readerChatHistory: readerChatHistory.value,
+      readerRefChat: readerRefChat.value,
+      readerRefWriter: readerRefWriter.value,
     };
     localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(payload));
   } catch {
@@ -265,6 +281,8 @@ function loadChatData() {
     if (Array.isArray(data.writerChatHistory)) writerChatHistory.value = data.writerChatHistory.map(replacePlaceholderTime);
     if (Array.isArray(data.auditorMessages)) auditorMessages.value = data.auditorMessages;
     if (Array.isArray(data.auditorChatHistory)) auditorChatHistory.value = data.auditorChatHistory.map(replacePlaceholderTime);
+    if (Array.isArray(data.readerMessages)) readerMessages.value = data.readerMessages;
+    if (Array.isArray(data.readerChatHistory)) readerChatHistory.value = data.readerChatHistory.map(replacePlaceholderTime);
   } catch {
     /* ignore */
   }
@@ -278,7 +296,7 @@ function replacePlaceholderTime(item: ChatHistoryItem): ChatHistoryItem {
 }
 
 watch(
-  [freeChatMessages, freeChatHistory, writerMessages, writerChatHistory, auditorMessages, auditorChatHistory],
+  [freeChatMessages, freeChatHistory, writerMessages, writerChatHistory, auditorMessages, auditorChatHistory, readerMessages, readerChatHistory, readerRefChat, readerRefWriter],
   () => {
     saveChatData();
   },
@@ -318,31 +336,36 @@ const currentMessages = computed({
   get: () => {
     if (activeSidebarTab.value === "chat") return freeChatMessages.value;
     if (activeSidebarTab.value === "writer") return writerMessages.value;
-    return auditorMessages.value;
+    if (activeSidebarTab.value === "auditor") return auditorMessages.value;
+    return readerMessages.value;
   },
   set: (val) => {
     if (activeSidebarTab.value === "chat") freeChatMessages.value = val;
     else if (activeSidebarTab.value === "writer") writerMessages.value = val;
-    else auditorMessages.value = val;
+    else if (activeSidebarTab.value === "auditor") auditorMessages.value = val;
+    else readerMessages.value = val;
   },
 });
 
 const currentChatHistory = computed(() => {
   if (activeSidebarTab.value === "chat") return freeChatHistory.value;
   if (activeSidebarTab.value === "writer") return writerChatHistory.value;
-  return auditorChatHistory.value;
+  if (activeSidebarTab.value === "auditor") return auditorChatHistory.value;
+  return readerChatHistory.value;
 });
 
 const currentActiveHistoryId = computed({
   get: () => {
     if (activeSidebarTab.value === "chat") return activeFreeChatHistoryId.value;
     if (activeSidebarTab.value === "writer") return activeWriterHistoryId.value;
-    return activeAuditorHistoryId.value;
+    if (activeSidebarTab.value === "auditor") return activeAuditorHistoryId.value;
+    return activeReaderHistoryId.value;
   },
   set: (val) => {
     if (activeSidebarTab.value === "chat") activeFreeChatHistoryId.value = val;
     else if (activeSidebarTab.value === "writer") activeWriterHistoryId.value = val;
-    else activeAuditorHistoryId.value = val;
+    else if (activeSidebarTab.value === "auditor") activeAuditorHistoryId.value = val;
+    else activeReaderHistoryId.value = val;
   },
 });
 
@@ -350,19 +373,26 @@ const currentComposerText = computed({
   get: () => {
     if (activeSidebarTab.value === "chat") return freeChatComposerText.value;
     if (activeSidebarTab.value === "writer") return writerComposerText.value;
-    return auditorComposerText.value;
+    if (activeSidebarTab.value === "auditor") return auditorComposerText.value;
+    return readerComposerText.value;
   },
   set: (val) => {
     if (activeSidebarTab.value === "chat") freeChatComposerText.value = val;
     else if (activeSidebarTab.value === "writer") writerComposerText.value = val;
-    else auditorComposerText.value = val;
+    else if (activeSidebarTab.value === "auditor") auditorComposerText.value = val;
+    else readerComposerText.value = val;
   },
 });
 
 const currentModel = computed({
-  get: () => (activeSidebarTab.value === "auditor" ? aiSettings.auditorModel : aiSettings.model),
+  get: () => {
+    if (activeSidebarTab.value === "auditor") return aiSettings.auditorModel;
+    if (activeSidebarTab.value === "reader") return aiSettings.readerModel;
+    return aiSettings.model;
+  },
   set: (val) => {
     if (activeSidebarTab.value === "auditor") aiSettings.auditorModel = val;
+    else if (activeSidebarTab.value === "reader") aiSettings.readerModel = val;
     else aiSettings.model = val;
   },
 });
@@ -398,9 +428,11 @@ const slashButtonTitle = computed(() =>
 /** 对话标签页输入框占位符：命中指令时提示继续写需求正文。 */
 const composerPlaceholder = computed(() => {
   if (activeSidebarTab.value !== "chat") {
-    return activeSidebarTab.value === "writer"
-      ? "给 AI 写手发送消息... (Ctrl+Enter 发送)"
-      : "粘贴完成的草稿给审核员评估... (Ctrl+Enter 发送)";
+    if (activeSidebarTab.value === "writer")
+      return "给 AI 写手发送消息... (Ctrl+Enter 发送)";
+    if (activeSidebarTab.value === "auditor")
+      return "粘贴完成的草稿给审核员评估... (Ctrl+Enter 发送)";
+    return "粘贴一段正文，让读者从追书视角点评... (Ctrl+Enter 发送)";
   }
   return activeSlashCommand.value
     ? `已启用「${activeSlashCommand.value.label}」，可直接写下或粘贴需求正文...`
@@ -839,9 +871,9 @@ function removeNarrativeChip(chip: NarrativeChip) {
   toggleNarrativeOption(scope, chip.kind, chip.id);
 }
 
-/* 切到审核意见页时收起面板：该页不接入叙事定制。 */
+/* 切到审核意见 / 读者评估页时收起面板：这两页不接入叙事定制。 */
 watch(activeSidebarTab, (tab) => {
-  if (tab === "auditor") narrativeOpen.value = false;
+  if (tab === "auditor" || tab === "reader") narrativeOpen.value = false;
   /* 故事定制仅「对话」页有效，离开该页即收起。 */
   if (tab !== "chat") storyOpen.value = false;
 });
@@ -904,25 +936,29 @@ function removeStoryChip(chip: StoryChip) {
 const isChatSending = ref(false);
 const isWriterSending = ref(false);
 const isAuditorSending = ref(false);
-/* 正在进行的 AI 请求，按页签各存一份：三个页签可以同时跑，
-   「停止生成」只掐掉当前页签这一路，不会误伤另外两路。 */
+const isReaderSending = ref(false);
+/* 正在进行的 AI 请求，按页签各存一份：各个页签可以同时跑，
+   「停止生成」只掐掉当前页签这一路，不会误伤另外几路。 */
 const activeAbortControllers: Record<SidebarTab, AbortController | null> = {
   chat: null,
   writer: null,
   auditor: null,
+  reader: null,
 };
 
 const isSendingCurrent = computed(() => {
   if (activeSidebarTab.value === "chat") return isChatSending.value;
   if (activeSidebarTab.value === "writer") return isWriterSending.value;
-  return isAuditorSending.value;
+  if (activeSidebarTab.value === "auditor") return isAuditorSending.value;
+  return isReaderSending.value;
 });
 
 /** 统一切换某个页签的「正在生成」标志。 */
 function setTabSending(tab: SidebarTab, value: boolean) {
   if (tab === "chat") isChatSending.value = value;
   else if (tab === "writer") isWriterSending.value = value;
-  else isAuditorSending.value = value;
+  else if (tab === "auditor") isAuditorSending.value = value;
+  else isReaderSending.value = value;
 }
 
 /**
@@ -964,7 +1000,7 @@ function closeMoreMenu() {
   moreMenuOpen.value = false;
 }
 
-type TabRecordKey = "chat" | "writer" | "auditor";
+type TabRecordKey = "chat" | "writer" | "auditor" | "reader";
 
 interface ChatRecordTab {
   tabId: TabRecordKey;
@@ -977,6 +1013,7 @@ function tabRecords(): ChatRecordTab[] {
     { tabId: "chat", tabName: "对话", history: freeChatHistory.value },
     { tabId: "writer", tabName: "AI写作", history: writerChatHistory.value },
     { tabId: "auditor", tabName: "审核意见", history: auditorChatHistory.value },
+    { tabId: "reader", tabName: "读者评估", history: readerChatHistory.value },
   ];
 }
 
@@ -1000,6 +1037,7 @@ function findTabHistory(id: string): ChatHistoryItem[] | undefined {
   if (id === "chat") return freeChatHistory.value;
   if (id === "writer") return writerChatHistory.value;
   if (id === "auditor") return auditorChatHistory.value;
+  if (id === "reader") return readerChatHistory.value;
   return undefined;
 }
 
@@ -1030,6 +1068,7 @@ async function importChatRecords() {
           ...freeChatHistory.value.map((h) => h.id),
           ...writerChatHistory.value.map((h) => h.id),
           ...auditorChatHistory.value.map((h) => h.id),
+          ...readerChatHistory.value.map((h) => h.id),
         );
         let counter = latestId;
 
@@ -1111,11 +1150,13 @@ const tabScrollPositions = reactive<Record<SidebarTab, number>>({
   chat: 0,
   writer: 0,
   auditor: 0,
+  reader: 0,
 });
 const prevLength = reactive<Record<SidebarTab, number>>({
   chat: 0,
   writer: 0,
   auditor: 0,
+  reader: 0,
 });
 
 function handleMessagesScroll() {
@@ -1409,8 +1450,92 @@ function applyToCard(message: ChatMessage) {
       ? "自由对话"
       : activeSidebarTab.value === "writer"
       ? "AI写作"
-      : "审核意见";
+      : activeSidebarTab.value === "auditor"
+      ? "审核意见"
+      : "读者评估";
   requestCreateCard(`${prefix} · ${message.content.slice(0, 18)}`, message.content);
+}
+
+/* ---- 读者评估页：解析评估结果 + 一键快捷评估 ----------------------------
+   读者评估的 AI 回复按 readerAgent 约定输出一个 ```json ``` 评估块。
+   每条 AI 回复正文下方由 <ReaderResultInline> 即时渲染对应的 <ReaderCard>
+   （见模板）；同时解析出「最新一次」结构化结果，供「对话 / AI写作」页可选引用。 */
+
+/** 最新一次读者评估结果（跨页签使用，供 chat / writer 引用）。 */
+const latestReaderEval = computed(() => {
+  const list = readerMessages.value;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (m.role === "assistant" && !m.loading && m.content.trim()) {
+      const r = extractReaderEvaluation(m.content);
+      if (r) return r;
+    }
+  }
+  return null;
+});
+
+/** 读者评估页顶部按钮：以读者视角评估「当前打开的那一篇文档」。 */
+function runReaderEvaluateDoc() {
+  if (isSendingCurrent.value) return;
+  sendMessage("请以普通读者视角评估当前打开的那一篇文档，先用工具把正文完整读进来，再点评。");
+}
+
+/** 读者评估页顶部按钮：以读者视角评估「写作画布当前选中的卡片」。 */
+function runReaderEvaluateCard() {
+  if (isSendingCurrent.value) return;
+  sendMessage("请以普通读者视角评估写作画布当前选中的文本卡片，先用工具把卡片正文完整读进来，再点评。");
+}
+
+/** 读者评估页顶部按钮：清空读者会话。 */
+function clearReaderConversation() {
+  if (isSendingCurrent.value) return;
+  readerMessages.value = [];
+  readerChatHistory.value = [];
+  activeReaderHistoryId.value = null;
+  readerComposerText.value = "";
+  showToast("已清空", "读者评估对话已清空。", "habit");
+}
+
+/* ---- 对话 / AI写作 可选引用读者评估数据 ---------------------------------
+   用户可自由决定「对话」「AI写作」两个页签是否参考读者评估的最新结果：
+   - 开启后，只要读者评估页已产出一份结果，就把该结果以只读上下文注入
+     对应页签的系统提示词，让模型适当调整内容与节奏；
+   - 未产出结果时引用为空，不影响原流程。 */
+
+function readerRefEnabled(tab: SidebarTab): boolean {
+  return tab === "chat" ? readerRefChat.value : tab === "writer" ? readerRefWriter.value : false;
+}
+
+function toggleReaderRef() {
+  const tab = activeSidebarTab.value;
+  if (tab === "chat") readerRefChat.value = !readerRefChat.value;
+  else if (tab === "writer") readerRefWriter.value = !readerRefWriter.value;
+  else return;
+  if (readerRefEnabled(tab)) {
+    if (latestReaderEval.value) {
+      showToast("已开启读者评估参考", "创作时将参考读者评估页的最新结果适当调整。", "edit");
+    } else {
+      showToast("已开启读者评估参考", "读者评估页还没有结果，先在「读者」页生成一次评估。", "edit");
+    }
+  } else {
+    showToast("已关闭读者评估参考", "对话 / 写作将不再注入读者评估数据。", "edit");
+  }
+}
+
+/** 供系统提示词注入的只读上下文；没有可用结果时返回空串。 */
+function readerReferenceContext(): string {
+  const r = latestReaderEval.value;
+  if (!r) return "";
+  const lines = [
+    "【读者视角参考（自动引用自「读者」标签页的最新一次评估，仅供参考，不要复述给用户）】",
+    `以下是最新读者评估的数据，请据此适当调整创作的内容、爽点与节奏：`,
+    `- 综合评分 ${r.overall} / 10${r.would_continue ? "" : "（读者可能弃文，需要把期待感拉回来）"}`,
+    `- 吸引力 ${r.scores.attraction} / 情感共鸣 ${r.scores.emotion} / 追更欲 ${r.scores.curiosity} / 爽点兑现 ${r.scores.payoff}`,
+  ];
+  if (r.one_liner) lines.push(`- 读者一句话：${r.one_liner}`);
+  if (r.praise.length > 0) lines.push(`- 读者认可的亮点：${r.praise.join("；")} —— 创作时保留并发扬`);
+  if (r.complaints.length > 0) lines.push(`- 读者吐槽/毒点：${r.complaints.join("；")} —— 创作时尽量规避或修正这些问题`);
+  return lines.join("\n");
 }
 
 const webSearchMode = computed({
@@ -1504,7 +1629,7 @@ function resolveContinuation(
 ): { ctx: ContinuationContext; command: SlashCommand | null } | null {
   if (!isContinueRequest(userText)) return null;
   const list =
-    tab === "chat" ? freeChatMessages.value : tab === "writer" ? writerMessages.value : auditorMessages.value;
+    tab === "chat" ? freeChatMessages.value : tab === "writer" ? writerMessages.value : tab === "auditor" ? auditorMessages.value : readerMessages.value;
   const prev = findPrevTurn(list);
   if (!prev) return null;
 
@@ -1544,7 +1669,12 @@ async function streamAiReply(
   slashOverride?: SlashCommandHit | null,
 ) {
   const { provider, apiKey, url } = aiSettings;
-  const model = tab === "auditor" ? aiSettings.auditorModel : aiSettings.model;
+  const model =
+    tab === "auditor"
+      ? aiSettings.auditorModel
+      : tab === "reader"
+      ? aiSettings.readerModel
+      : aiSettings.model;
   let systemPrompt = "";
 
   const targetMessages =
@@ -1552,7 +1682,9 @@ async function streamAiReply(
       ? freeChatMessages.value
       : tab === "writer"
       ? writerMessages.value
-      : auditorMessages.value;
+      : tab === "auditor"
+      ? auditorMessages.value
+      : readerMessages.value;
 
   /* 「对话」标签页命中的创作指令（/身份模板 之类）。未命中为 null。 */
   let slashHit =
@@ -1574,8 +1706,10 @@ async function streamAiReply(
     systemPrompt = aiSettings.chatPrompt.trim() || CHAT_AGENT_PROMPT;
   } else if (tab === "writer") {
     systemPrompt = aiSettings.writerPrompt.trim() || WRITER_AGENT_PROMPT;
-  } else {
+  } else if (tab === "auditor") {
     systemPrompt = aiSettings.auditorPrompt.trim() || AUDITOR_AGENT_PROMPT;
+  } else {
+    systemPrompt = aiSettings.readerPrompt.trim() || READER_AGENT_PROMPT;
   }
 
   /* 附件内容作为后台上下文携带，绝不进入用户可见的消息文本。 */
@@ -1584,9 +1718,19 @@ async function streamAiReply(
   }
 
   /* Knowledge items are exposed as *tools*, not dumped into the prompt.
-     The model receives a catalogue and reads only what it actually needs. */
+     The model receives a catalogue and reads only what it actually needs.
+     读者评估页同样接入知识工具：加载「网文读者受众画像与心理研究 / 真实书评
+     语料 / 爽点毒点清单」三份默认知识项，让读者从真实受众视角评分。 */
   const scope: KnowledgeScope | null =
-    tab === "chat" ? "chat" : tab === "writer" ? "writer" : tab === "auditor" ? "auditor" : null;
+    tab === "chat"
+      ? "chat"
+      : tab === "writer"
+      ? "writer"
+      : tab === "auditor"
+      ? "auditor"
+      : tab === "reader"
+      ? "reader"
+      : null;
   const useKnowledgeTools = scope !== null && knowledgeList(scope).length > 0;
 
   if (scope && useKnowledgeTools) {
@@ -1641,6 +1785,16 @@ async function streamAiReply(
     const storyDirective = buildStoryDirective();
     if (storyDirective) {
       systemPrompt += `\n\n${storyDirective}`;
+    }
+  }
+
+  /* 读者评估参考：仅「对话 / AI写作」两个标签页，由用户开关控制。
+     开启且读者评估页已有结果时，把最新读者评估作为只读参考注入，让模型
+     据此适当调整；未开启或没有结果时不做任何注入，流程与原来完全一致。 */
+  if ((tab === "chat" || tab === "writer") && readerRefEnabled(tab)) {
+    const readerCtx = readerReferenceContext();
+    if (readerCtx) {
+      systemPrompt += `\n\n${readerCtx}`;
     }
   }
 
@@ -1723,16 +1877,18 @@ async function streamAiReply(
 
   /* 编辑区工具：按当前所在的主界面挂载，各界面互不越界。
      文档界面 → 只给文档工具；写作画布 → 只给卡片工具；其余界面（洞察等）
-     不挂任何编辑区工具，AI 只依据对话与附件作答。 */
+     不挂任何编辑区工具，AI 只依据对话与附件作答。
+     读者评估页：除通用规则外，明确要求先通过工具把用户所指的正文读进来，
+     再以「普通读者」视角点评——绝不凭空猜测内容。 */
   if (workspace.value === "docs") {
     systemPrompt += `\n\n【文档编辑区工具（当前界面：文档）】你有 5 个工具可读写「文档」界面里的文档条目：list_documents / read_document / create_document / update_document / append_document。
   · 用户说「分析/总结/审阅/评价这篇文档、当前文档、选中的文档、上面的正文」时，先调用 read_document（省略 title 即读用户当前打开的那一篇）把正文读进来，再基于真实正文作答，严禁凭空猜测内容。
   · 只有用户明确要求「改写/替换/润色这篇文档」才调用 update_document；明确要求「续写/追加」才调用 append_document。没有明确指示时一律只读不写。
   · 用户明确要求「新建/创建一篇文档」「把这些内容单独存成一篇新文档」时，调用 create_document 新建条目，不要用 update_document 覆盖现有文档。反之，用户要改的是已有文档时，也不要用 create_document 另建一篇。
-  · 本界面下你接触不到、也不要提及写作画布的文本卡片；用户此刻说的「正文 / 这段 / 这篇」指的都是文档条目。`;
+  · 本界面下你接触不到、也不要提及写作画布的文本卡片；用户此刻说的「正文 / 这段 / 这篇」指的都是文档条目。${tab === "reader" ? `\n  · 你在「读者评估」页工作：用户的意图就是让你以普通读者视角评价正文，务必先用 read_document 把目标文档正文完整读进来（正文过长时分页读全），再依据真实内容点评。` : ""}`;
   } else if (workspace.value === "cards") {
     systemPrompt += `\n\n【画布文本卡片工具（当前界面：写作画布）】你有 4 个工具可读写写作画布里的文本卡片：list_cards / read_card / create_card / update_card。只有当你明确收到这类指令时才使用它们——例如用户说「把这段内容创建为卡片放入画布」「阅读某某卡片后重新输出」「修改某张卡片」；若用户没有明确要求操作卡片，就按当前任务正常作答，不要自行创建、改动或删除任何文本卡片。
-  · 本界面下你接触不到、也不要提及「文档」界面的文档条目；用户此刻说的「这段 / 这张」指的都是画布卡片。`;
+  · 本界面下你接触不到、也不要提及「文档」界面的文档条目；用户此刻说的「这段 / 这张」指的都是画布卡片。${tab === "reader" ? `\n  · 你在「读者评估」页工作：用户的意图就是让你以普通读者视角评价画布卡片正文，务必先用 list_cards 找到目标卡片，再用 read_card 读取其完整正文，再依据真实内容点评。` : ""}`;
   } else {
     systemPrompt += `\n\n【当前界面没有可操作的编辑区】你此刻拿不到文档条目，也拿不到画布文本卡片，不要声称已读取或已改动它们。请只依据对话内容与用户挂载的附件作答；确实需要正文时，请用户把内容粘贴进来或切到对应界面。`;
   }
@@ -1845,7 +2001,8 @@ async function streamAiReply(
     }
 
     /* 全局 Token 账本：按当前标签分桶，主页 HUD 读的就是这份数据。 */
-    const bucket: TokenCategory = tab === "chat" ? "chat" : tab === "writer" ? "writer" : "auditor";
+    const bucket: TokenCategory =
+      tab === "chat" ? "chat" : tab === "writer" ? "writer" : tab === "auditor" ? "auditor" : "reader";
     recordTokens(bucket, result.tokens);
 
     /* 自动续写的过程提示是临时的，收尾时撤掉，只留真正的工具轨迹。 */
@@ -1959,7 +2116,9 @@ async function sendMessage(overrideText?: string) {
       ? freeChatMessages.value
       : currentTab === "writer"
       ? writerMessages.value
-      : auditorMessages.value;
+      : currentTab === "auditor"
+      ? auditorMessages.value
+      : readerMessages.value;
 
   /* 本轮生效的叙事定制：只作为气泡上的展示胶囊留档，指令本体走系统提示词。 */
   const narrativeMeta =
@@ -2016,7 +2175,8 @@ async function sendMessage(overrideText?: string) {
       freeChatComposerText.value = "";
       chatSlashCmd.value = null;
     } else if (currentTab === "writer") writerComposerText.value = "";
-    else auditorComposerText.value = "";
+    else if (currentTab === "auditor") auditorComposerText.value = "";
+    else readerComposerText.value = "";
 
     if (composerRef.value) {
       composerRef.value.style.height = "auto";
@@ -2386,6 +2546,13 @@ onBeforeUnmount(() => {
           >
             审核意见
           </button>
+          <button
+            class="agent-nav-btn"
+            :class="{ active: activeSidebarTab === 'reader' }"
+            @click="activeSidebarTab = 'reader'"
+          >
+            读者
+          </button>
         </div>
       </div>
 
@@ -2421,7 +2588,7 @@ onBeforeUnmount(() => {
             </button>
             <div class="menu-divider"></div>
             <div class="menu-section-title">
-              {{ activeSidebarTab === 'chat' ? '对话历史' : activeSidebarTab === 'writer' ? 'AI写作历史' : '审核员历史' }}
+              {{ activeSidebarTab === 'chat' ? '对话历史' : activeSidebarTab === 'writer' ? 'AI写作历史' : activeSidebarTab === 'auditor' ? '审核员历史' : '读者评估历史' }}
             </div>
             <div class="history-list">
               <div v-for="item in currentChatHistory" :key="item.id" class="history-item">
@@ -2447,8 +2614,28 @@ onBeforeUnmount(() => {
     </div>
 
     <div ref="chatMessagesRef" class="chat-messages" @scroll="handleMessagesScroll">
+      <!-- 读者评估页的顶部快捷工具条（评估/清空）：独立组件，便于针对性维护。
+           评估结果卡片不在此处，而是紧随每条 AI 回复正文下方呈现。 -->
+      <ReaderTab
+        v-if="activeSidebarTab === 'reader'"
+        class="reader-tab-block"
+        :workspace="workspace"
+        :sending="isSendingCurrent"
+        @evaluate-doc="runReaderEvaluateDoc"
+        @evaluate-card="runReaderEvaluateCard"
+        @clear="clearReaderConversation"
+      />
+
       <div v-if="currentMessages.length === 0" class="chat-empty">
-        {{ activeSidebarTab === 'chat' ? '轻松与 AI 展开自由对话...' : activeSidebarTab === 'writer' ? '开始AI写作对话吧' : '粘贴草稿开始审查评估吧' }}
+        {{
+          activeSidebarTab === 'chat'
+            ? '轻松与 AI 展开自由对话...'
+            : activeSidebarTab === 'writer'
+            ? '开始AI写作对话吧'
+            : activeSidebarTab === 'auditor'
+            ? '粘贴草稿开始审查评估吧'
+            : '粘贴一段正文，或点击上方按钮让读者评估当前文档 / 卡片'
+        }}
       </div>
 
       <div v-for="message in currentMessages" :key="message.id" class="message" :class="message.role">
@@ -2520,7 +2707,7 @@ onBeforeUnmount(() => {
 
         <template v-else>
           <div class="message-label">
-            {{ activeSidebarTab === 'chat' ? 'AI 助手' : activeSidebarTab === 'writer' ? WRITER_AGENT_NAME : AUDITOR_AGENT_NAME }}
+            {{ activeSidebarTab === 'chat' ? 'AI 助手' : activeSidebarTab === 'writer' ? WRITER_AGENT_NAME : activeSidebarTab === 'auditor' ? AUDITOR_AGENT_NAME : READER_AGENT_NAME }}
           </div>
           <div
             class="assistant-reply-zone"
@@ -2620,6 +2807,12 @@ onBeforeUnmount(() => {
                   接着写完
                 </button>
               </div>
+              <!-- 读者评估结果卡片：位于本条 AI 回复正文的下方，符合从上往下的阅读顺序。 -->
+              <ReaderResultInline
+                v-if="activeSidebarTab === 'reader' && !message.loading"
+                class="reader-result-inline"
+                :content="message.content"
+              />
             </template>
             <!-- Token 消耗统计：仅展示消耗情况，不属于正文，复制/拖拽生成卡片时不会进入内容 -->
             <div v-if="!message.loading && (message.tokens || message.timestamp || message.continued)" class="assistant-footer-meta">
@@ -2662,7 +2855,7 @@ onBeforeUnmount(() => {
     <div class="chat-composer">
       <!-- 素材库 + 故事定制 (仅对话) + 叙事定制 (对话 / AI写作) -->
       <div ref="materialsWrapRef" class="materials-wrap">
-      <div v-if="activeSidebarTab !== 'auditor'" class="material-bar">
+      <div v-if="activeSidebarTab !== 'auditor' && activeSidebarTab !== 'reader'" class="material-bar">
         <button
           v-if="activeSidebarTab === 'chat' && aiSettings.materialLibraryEnabled"
           class="material-toggle-btn"
@@ -2694,6 +2887,23 @@ onBeforeUnmount(() => {
           <Layers :size="14" :stroke-width="1.8" />
           叙事定制
           <span v-if="narrativeCount > 0" class="material-count">{{ narrativeCount }}</span>
+        </button>
+        <!-- 读者评估：仅「对话 / AI写作」两个页签，用户自由选择是否参考
+             读者评估页的最新数据来适当调整创作。 -->
+        <button
+          v-if="activeSidebarTab === 'chat' || activeSidebarTab === 'writer'"
+          class="material-toggle-btn reader-ref-btn"
+          :class="{ active: readerRefEnabled(activeSidebarTab) }"
+          :title="
+            readerRefEnabled(activeSidebarTab)
+              ? '开启中：创作时将参考「读者」页的最新评估数据（点击关闭）'
+              : '参考「读者」页的最新评估数据来适当调整创作（点击开启）'
+          "
+          @click="toggleReaderRef"
+        >
+          <BookOpen :size="14" :stroke-width="1.8" />
+          读者评估
+          <span v-if="readerRefEnabled(activeSidebarTab) && latestReaderEval" class="material-count">✓</span>
         </button>
       </div>
 
@@ -3443,6 +3653,16 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   padding: 16px;
   background: var(--surface-container-lowest);
+}
+
+/* 读者评估页顶部快捷工具条：随会话一起滚动，不出现在其他页签。 */
+.reader-tab-block {
+  margin-bottom: 6px;
+}
+
+/* 读者评估结果卡片：紧随 AI 回复正文下方，保持从上往下的阅读顺序。 */
+.reader-result-inline {
+  margin-top: 10px;
 }
 
 .scroll-bottom-btn {

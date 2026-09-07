@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, ref, onBeforeUnmount, onMounted } from "vue";
-import { Settings2, X, FileText, Plus, Trash2, Palette, Database, DownloadCloud, CheckCircle2, RefreshCw, Download, Upload, RotateCcw, Check, Pencil, Pipette, Server, Search, ChevronDown, Keyboard, Info, ExternalLink, MessageSquare } from "lucide-vue-next";
+import { Settings2, X, FileText, Plus, Trash2, Palette, Database, DownloadCloud, CheckCircle2, RefreshCw, Download, Upload, RotateCcw, Check, Pencil, Pipette, Server, Search, ChevronDown, Keyboard, Info, ExternalLink, MessageSquare, BookOpen } from "lucide-vue-next";
 import {
   aiSettings,
   activateProviderProfile,
@@ -44,6 +44,7 @@ import ThemeColorPicker from "./ThemeColorPicker.vue";
 import ChatSettingsTab from "./ChatSettingsTab.vue";
 import { WRITER_AGENT_PROMPT } from "../prompts/writerAgent";
 import { AUDITOR_AGENT_PROMPT } from "../prompts/auditorAgent";
+import { READER_AGENT_PROMPT } from "../prompts/readerAgent";
 import { REFINE_AGENT_PROMPT } from "../prompts/refineAgent";
 import { vectorStore, rebuildInsightVectorIndex } from "../vectorStore";
 // 应用图标：直接引用 Tauri 打包所用的同一份图标，避免副本不同步
@@ -61,7 +62,7 @@ import {
 import { renderForReading } from "../markdown";
 import { showToast } from "../insightStore";
 
-type SettingsTab = "api" | "config" | "contentColor" | "shortcuts" | "chat" | "writer" | "auditor" | "refine" | "vector" | "about";
+type SettingsTab = "api" | "config" | "contentColor" | "shortcuts" | "chat" | "writer" | "auditor" | "reader" | "refine" | "vector" | "about";
 const activeTab = ref<SettingsTab>("api");
 
 /* ---- 快捷键清单（表单：名称 + 快捷键） ---- */
@@ -511,14 +512,16 @@ function resetRingLayout() {
 /** 已被挪动过的圆环数量（默认位置不入库，所以键数即挪动过的位点数）。 */
 const ringPositionCount = computed(() => Object.keys(readingRingStore.positions).length);
 
-function restorePrompt(type: "writer" | "auditor" | "refine") {
+function restorePrompt(type: "writer" | "auditor" | "reader" | "refine") {
   const defaults = {
     writer: WRITER_AGENT_PROMPT,
     auditor: AUDITOR_AGENT_PROMPT,
+    reader: READER_AGENT_PROMPT,
     refine: REFINE_AGENT_PROMPT,
   };
   if (type === "writer") aiSettings.writerPrompt = defaults.writer;
   else if (type === "auditor") aiSettings.auditorPrompt = defaults.auditor;
+  else if (type === "reader") aiSettings.readerPrompt = defaults.reader;
   else aiSettings.refinePrompt = defaults.refine;
 }
 
@@ -808,6 +811,10 @@ function onProfileAuditorModelChange(id: string, event: Event) {
   setProfileModel(id, (event.target as HTMLSelectElement).value, "auditorModel");
 }
 
+function onProfileReaderModelChange(id: string, event: Event) {
+  setProfileModel(id, (event.target as HTMLSelectElement).value, "readerModel");
+}
+
 /** Clear the form so the next 保存配置 creates a brand-new card. */
 function startNewProfile() {
   editingProfileId.value = "";
@@ -817,7 +824,7 @@ function startNewProfile() {
   statusType.value = "";
 }
 
-function addKnowledgeFile(type: "writer" | "auditor") {
+function addKnowledgeFile(type: "writer" | "auditor" | "reader") {
   const input = document.createElement("input");
   input.type = "file";
   input.multiple = true;
@@ -839,8 +846,10 @@ function addKnowledgeFile(type: "writer" | "auditor") {
 
         if (type === "writer") {
           aiSettings.writerKnowledge.push(newFile);
-        } else {
+        } else if (type === "auditor") {
           aiSettings.auditorKnowledge.push(newFile);
+        } else {
+          aiSettings.readerKnowledge.push(newFile);
         }
       } catch (error) {
         console.error("读取文件失败:", error);
@@ -870,8 +879,13 @@ function readFileContent(file: File): Promise<string> {
   });
 }
 
-function removeKnowledgeFile(type: "writer" | "auditor", id: string) {
-  const list = type === "writer" ? aiSettings.writerKnowledge : aiSettings.auditorKnowledge;
+function removeKnowledgeFile(type: "writer" | "auditor" | "reader", id: string) {
+  const list =
+    type === "writer"
+      ? aiSettings.writerKnowledge
+      : type === "auditor"
+      ? aiSettings.auditorKnowledge
+      : aiSettings.readerKnowledge;
   const index = list.findIndex(f => f.id === id);
   if (index !== -1) list.splice(index, 1);
 }
@@ -888,6 +902,10 @@ function onTabStatus(message: string, type: "ok" | "error") {
 
 function onAuditorAutoLoadChange(event: Event) {
   setKnowledgeAutoLoad("auditor", (event.target as HTMLInputElement).checked);
+}
+
+function onReaderAutoLoadChange(event: Event) {
+  setKnowledgeAutoLoad("reader", (event.target as HTMLInputElement).checked);
 }
 
 const localFonts = computed(() => fontState.localFonts);
@@ -1081,6 +1099,10 @@ onBeforeUnmount(() => {
             <FileText :size="16" :stroke-width="1.8" />
             审核员
           </button>
+          <button class="nav-item" :class="{ active: activeTab === 'reader' }" @click="activeTab = 'reader'">
+            <BookOpen :size="16" :stroke-width="1.8" />
+            读者
+          </button>
           <button class="nav-item" :class="{ active: activeTab === 'refine' }" @click="activeTab = 'refine'">
             <FileText :size="16" :stroke-width="1.8" />
             精修
@@ -1105,6 +1127,7 @@ onBeforeUnmount(() => {
               activeTab === 'chat' ? '对话设置' :
               activeTab === 'writer' ? 'AI写作设置' :
               activeTab === 'auditor' ? '审核员设置' :
+              activeTab === 'reader' ? '读者评估设置' :
               activeTab === 'refine' ? '精修设置' :
               activeTab === 'vector' ? '向量数据' : '关于'
             }}</h2>
@@ -1329,6 +1352,19 @@ onBeforeUnmount(() => {
                       class="profile-model-select"
                       :value="profile.auditorModel || profile.model"
                       @change="onProfileAuditorModelChange(profile.id, $event)"
+                    >
+                      <option v-for="m in (profile.models.length > 0 ? profile.models : [profile.model])" :key="m" :value="m">
+                        {{ m }}
+                      </option>
+                    </select>
+                  </div>
+
+                  <div class="profile-model-row">
+                    <label class="profile-model-label">读者模型</label>
+                    <select
+                      class="profile-model-select"
+                      :value="profile.readerModel || profile.model"
+                      @change="onProfileReaderModelChange(profile.id, $event)"
                     >
                       <option v-for="m in (profile.models.length > 0 ? profile.models : [profile.model])" :key="m" :value="m">
                         {{ m }}
@@ -1946,6 +1982,65 @@ onBeforeUnmount(() => {
               <button class="save-btn" @click="saveConfig">保存配置</button>
             </template>
 
+            <!-- 读者评估设置：只配置模型与提示词，不加载任何知识项。 -->
+            <template v-if="activeTab === 'reader'">
+              <div class="prompt-header">
+                <label class="field-label" for="readerPrompt">提示词</label>
+                <button class="restore-prompt-btn" title="恢复默认提示词" @click="restorePrompt('reader')">
+                  <RotateCcw :size="13" :stroke-width="1.8" />
+                  恢复默认
+                </button>
+              </div>
+              <textarea
+                id="readerPrompt"
+                v-model="aiSettings.readerPrompt"
+                class="prompt-textarea"
+                rows="12"
+                placeholder="请输入读者评估的提示词..."
+              ></textarea>
+
+              <div class="knowledge-section">
+                <div class="knowledge-header">
+                  <label class="field-label">知识</label>
+                  <div class="knowledge-header-actions">
+                    <label
+                      class="auto-load-control"
+                      title="自动加载内置默认知识素材（网文读者受众画像与心理研究、真实书评语料、爽点毒点清单）"
+                    >
+                      <span class="auto-load-text">自动加载</span>
+                      <span class="toggle-switch">
+                        <input type="checkbox" :checked="aiSettings.readerKnowledgeAutoLoad" @change="onReaderAutoLoadChange" />
+                        <span class="toggle-slider"></span>
+                      </span>
+                    </label>
+                    <button class="knowledge-add-btn" @click="addKnowledgeFile('reader')" title="添加知识文件">
+                      <Plus :size="16" :stroke-width="1.8" />
+                    </button>
+                  </div>
+                </div>
+                <div class="knowledge-list">
+                  <div v-if="aiSettings.readerKnowledge.length === 0" class="knowledge-empty">
+                    暂无知识文件，点击 + 添加
+                  </div>
+                  <div v-for="file in aiSettings.readerKnowledge" :key="file.id" class="knowledge-item">
+                    <div class="knowledge-file-info">
+                      <FileText :size="14" :stroke-width="1.8" />
+                      <span class="knowledge-file-name">{{ file.name }}</span>
+                    </div>
+                    <button class="knowledge-remove-btn" @click="removeKnowledgeFile('reader', file.id)" title="移除文件">
+                      <Trash2 :size="14" :stroke-width="1.8" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <p class="reader-settings-note">
+                读者评估页默认加载「网文读者受众画像与心理研究、真实书评语料、爽点毒点清单」三份知识项；同时它还会通过工具读取你当前选中的文档正文或画布文本卡片，再从真实读者视角点评。
+              </p>
+
+              <button class="save-btn" @click="saveConfig">保存配置</button>
+            </template>
+
             <!-- 精修设置 -->
             <template v-if="activeTab === 'refine'">
               <div class="prompt-header">
@@ -2132,7 +2227,7 @@ onBeforeUnmount(() => {
               <div class="about-card">
                 <div class="about-row">
                   <span class="about-row-label">版本</span>
-                  <span class="about-row-value">1.0.0</span>
+                  <span class="about-row-value">1.0.1</span>
                 </div>
                 <div class="about-row">
                   <span class="about-row-label">作者</span>
@@ -2782,6 +2877,14 @@ onBeforeUnmount(() => {
 .prompt-textarea:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px rgb(var(--primary-rgb) / 0.1);
+}
+
+/* 读者评估选项卡：说明该页不使用知识项，仅通过工具读取正文。 */
+.reader-settings-note {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--outline);
 }
 
 .knowledge-section {
