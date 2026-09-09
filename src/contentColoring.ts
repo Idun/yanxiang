@@ -299,12 +299,27 @@ function deepestSkip(stack: string[]): string | undefined {
   return undefined;
 }
 
+export interface ContentColoringOptions {
+  /**
+   * 是否在每个块级元素（WYSIWYG 的 `.md-block`）开头重置引号 / 括号状态。
+   *
+   * 默认 false：markdown 预览保留「跨段贯穿」诊断——某处缺了右引号时，其后
+   * 正文会被引号色贯穿，用来点名问题所在。
+   *
+   * WYSIWYG 编辑区开启后，某一处未闭合的引号（例如英文撇号 `'`、半个直引号）
+   * 只影响它所在的那一段，不会把后续所有段落都染成引号色——否则粘贴一篇含
+   * 单个撇号的正文，整篇下半段都会变成引号色，属于严重的渲染错误。
+   */
+  resetAtBlocks?: boolean;
+}
+
 /**
  * 给渲染好的 HTML 上一套内容配色。原样返回已是合法 HTML 字符串。
  *
  * @param html renderMarkdown 输出的 HTML（可再叠加查找高亮 / 修订定位标记）
  */
-export function applyContentColoring(html: string): string {
+export function applyContentColoring(html: string, options?: ContentColoringOptions): string {
+  const resetAtBlocks = options?.resetAtBlocks === true;
   const out: string[] = [];
   const stack: string[] = [];
   const state: ColorState = { quote: [], bracket: [] };
@@ -364,6 +379,12 @@ export function applyContentColoring(html: string): string {
               }
             }
           } else if (!/\/\s*>$/.test(raw) && !VOID_TAGS.has(name)) {
+            /* 块级元素（.md-block）开头把引号 / 括号状态清零：让未闭合的引号
+               只困在它所在的那一段里，不再贯穿后续段落。 */
+            if (resetAtBlocks && raw.includes("md-block")) {
+              state.quote.length = 0;
+              state.bracket.length = 0;
+            }
             stack.push(name);
           }
           i = gt + 1;

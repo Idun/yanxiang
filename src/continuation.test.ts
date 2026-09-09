@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { joinContinuation, looksUnfinished } from "./agentRunner";
-import { isContinueRequest } from "./chatSlashCommands";
+import { chatContinuationDirective, isContinueRequest } from "./chatSlashCommands";
 
 describe("isContinueRequest", () => {
   it("认得各种「接着写」的说法", () => {
@@ -122,5 +122,49 @@ describe("joinContinuation", () => {
   it("整段都是交代话时不会把正文吃空", () => {
     const out = joinContinuation("前文", "继续");
     expect(out.length).toBeGreaterThan("前文".length - 1);
+  });
+});
+
+describe("续写指令携带上一轮思考过程", () => {
+  const reasoning =
+    "上一段写到女主转身时，我判断该用心理独白而不是动作描写：她此刻的沉默比任何动作都更有张力，" +
+    "接下来要让门外的风替她说出没说出口的话，正好接上开头那盏没关的灯。";
+
+  it("chatContinuationDirective 会把思考过程作为衔接上下文交给模型", () => {
+    const out = chatContinuationDirective({
+      tail: "她把门带上。",
+      tailOnly: false,
+      reasoning,
+      request: "写一段女主离去的场景",
+      truncated: true,
+    });
+    expect(out).toContain("思考过程");
+    expect(out).toContain(reasoning);
+    expect(out).toContain("不要向用户复述");
+  });
+
+  it("无思考过程时续写指令不包含思考块", () => {
+    const out = chatContinuationDirective({
+      tail: "她把门带上。",
+      tailOnly: false,
+      request: "写一段女主离去的场景",
+      truncated: true,
+    });
+    expect(out).not.toContain("思考过程");
+  });
+
+  it("超长思考过程只保留尾部，并注明是尾部截取", () => {
+    const long = Array.from({ length: 260 }, (_, i) => `第${i}步的推理内容。`).join("");
+    const out = chatContinuationDirective({
+      tail: "正文断在这里。",
+      tailOnly: false,
+      reasoning: long,
+      reasoningTailOnly: true,
+      request: "继续",
+      truncated: true,
+    });
+    expect(out).toContain("思考过程尾部");
+    expect(out).toContain("第250步的推理内容。");
+    expect(out).not.toContain("第0步的推理内容。");
   });
 });

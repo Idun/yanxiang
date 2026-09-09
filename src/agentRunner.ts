@@ -348,6 +348,31 @@ async function readSse(
 
 /* ---------------- one round ---------------- */
 
+/** 单条工具结果回注模型的字数上限。多篇文档连续读取时正文极易膨胀，
+    不截断就会把下一轮的上下文撑爆（API 直接以超长错误打回，整回合中断）。 */
+const MAX_TOOL_RESULT_CHARS = 20000;
+
+/** 续写重放时带上的思考过程长度上限。 */
+const REASONING_REPLAY_LIMIT = 4000;
+
+/** 工具结果超长时截断并附说明，保证模型仍能按提示分页继续读。 */
+function clampToolResult(output: string): string {
+  if (output.length <= MAX_TOOL_RESULT_CHARS) return output;
+  return `${output.slice(0, MAX_TOOL_RESULT_CHARS)}\n\n…（工具结果过长，已按 ${MAX_TOOL_RESULT_CHARS} 字符截断；需要剩余内容时请分页 / 缩小范围后再次调用工具读取）`;
+}
+
+/** 组装「接着写」要重放给模型的上一轮 assistant 内容。
+    正文之外把已产出的思考过程一并附上（明确标注仅作衔接），否则模型在
+    自动续写时看不到自己刚才想到哪一步，容易从零重新推理。 */
+function continuationReplay(text: string, reasoning: string): string {
+  let replay = text;
+  if (reasoning.trim()) {
+    const tail = reasoning.length > REASONING_REPLAY_LIMIT ? reasoning.slice(-REASONING_REPLAY_LIMIT) : reasoning;
+    replay = `${text}\n\n[上一条回复的思考过程 · 仅供衔接参考，不属于正文，不要向用户复述]\n${tail}`;
+  }
+  return replay;
+}
+
 interface RoundResult {
   text: string;
   /** Model's chain-of-thought / reasoning, kept separate from the visible answer. */
@@ -1206,13 +1231,13 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         opts.onToolResult?.(call, output);
 
         if (apiType === "anthropic-messages") {
-          anthropicResults.push({ type: "tool_result", tool_use_id: call.id, content: output });
+          anthropicResults.push({ type: "tool_result", tool_use_id: call.id, content: clampToolResult(output) });
         } else if (apiType === "openai-responses") {
-          responsesInput.push({ type: "function_call_output", call_id: call.id, output });
+          responsesInput.push({ type: "function_call_output", call_id: call.id, output: clampToolResult(output) });
         } else if (apiType === "google-generative") {
-          googleResults.push({ functionResponse: { name: call.name, response: { result: output } } });
+          googleResults.push({ functionResponse: { name: call.name, response: { result: clampToolResult(output) } } });
         } else {
-          openAiMessages.push({ role: "tool", tool_call_id: call.id, content: output });
+          openAiMessages.push({ role: "tool", tool_call_id: call.id, content: clampToolResult(output) });
         }
       }
 
@@ -1237,8 +1262,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     if (continuing && !lastRoundText.trim()) break;
 
     /* 把这半截正文作为 assistant 轮回放（前面工具轮已经各自入过账，这里只补
-       收尾那一轮），再补一条续写指令，让模型看得见断点上下文。 */
-    const replay = lastRoundText.trim() ? lastRoundText : text;
+       收尾那一轮），再补一条续写指令，让模型看得见断点上下文。
+       思考过程也一并附上：模型自动续写时才知道自己刚才想到哪一步。 */
+    const replay = continuationReplay(lastRoundText.trim() ? lastRoundText : text, reasoning);
     if (apiType === "anthropic-messages") {
       anthropicMessages.push({ role: "assistant", content: replay });
       anthropicMessages.push({ role: "user", content: continueDirective });

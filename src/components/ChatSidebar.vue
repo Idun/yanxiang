@@ -61,6 +61,18 @@ import {
   runDocTool,
 } from "../docTools";
 import {
+  addWriterQuickCommand,
+  removeWriterQuickCommand,
+  resetWriterQuickCommands,
+  writerQuickCommands,
+} from "../quickCommands";
+import {
+  describeDocumentSubAgentCall,
+  documentSubAgentToolDefinition,
+  isDocumentSubAgentTool,
+  makeDocumentSubAgentExecutor,
+} from "../docSubAgent";
+import {
   materialStore,
   selectedMaterials,
   createMaterial,
@@ -304,9 +316,9 @@ watch(
 );
 
 /* --- Popover States --- */
-const activePopover = ref<"slash" | "model" | "webSearch" | "thinking" | null>(null);
+const activePopover = ref<"slash" | "model" | "webSearch" | "thinking" | "quickcmd" | null>(null);
 
-function togglePopover(pop: "slash" | "model" | "webSearch" | "thinking") {
+function togglePopover(pop: "slash" | "model" | "webSearch" | "thinking" | "quickcmd") {
   activePopover.value = activePopover.value === pop ? null : pop;
 }
 
@@ -1242,6 +1254,32 @@ watch(
   },
 );
 
+/* 流式输出跟随：单条消息内部正文 / 思考过程持续增长时，只要用户本就停在
+   末尾附近（showScrollToBottom 为 false），就持续把滚动条钉在末尾，让最新
+   内容（尤其是思考链）始终可见；用户自己往上翻看时，handleMessagesScroll
+   会把 showScrollToBottom 置为 true，跟随随即失效；滚回末尾后自动恢复。 */
+watch(
+  () => {
+    const list = currentMessages.value;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      if (m.role !== "assistant" || !m.loading) continue;
+      const bodyLen = m.content?.length ?? 0;
+      /* 思考过程只有展开时才渲染进布局，折叠时它的增长不影响高度，无需跟随。 */
+      const reasonLen =
+        m.reasoning && expandedReasoningIds.value.has(m.id) ? m.reasoning.length : 0;
+      return bodyLen + reasonLen;
+    }
+    return 0;
+  },
+  () => {
+    if (showScrollToBottom.value) return;
+    const el = chatMessagesRef.value;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  },
+);
+
 watch(
   () => cardEvents.newChatRequest,
   () => {
@@ -1584,8 +1622,13 @@ const thinkingLevelLabel = computed(() => {
 function findPrevTurn(list: ChatMessage[]): { ai: ChatMessage; user: ChatMessage | null } | null {
   for (let i = list.length - 1; i >= 0; i--) {
     const m = list[i];
-    /* 正在生成的占位（本轮那条）与空回复都不算上一回合。 */
-    if (m.role !== "assistant" || m.loading || !m.content.trim()) continue;
+    /* 正在生成的占位（本轮那条）与空回复都不算上一回合。
+       空回复包括「正文与思考过程都为空」：若只在思考过程阶段被中断
+       （正文还没吐出来），思考过程本身就是断点，必须照样能接续。 */
+    if (m.role !== "assistant" || m.loading) continue;
+    const hasBody = m.content.trim().length > 0;
+    const hasReasoning = (m.reasoning ?? "").trim().length > 0;
+    if (!hasBody && !hasReasoning) continue;
     let user: ChatMessage | null = null;
     /* 往回找「真正提需求」的那条用户消息：一路跳过「继续」这类续写指令，
        否则连续续写第二次时会把上一句「继续」当成需求，丢掉原始需求与创作模式。 */
@@ -1611,6 +1654,9 @@ function plainUserText(m: ChatMessage, tab: SidebarTab): string {
 
 /** 交给模型的断点尾部长度上限：够它接上，又不至于把整篇再塞一遍。 */
 const CONTINUE_TAIL_LIMIT = 1800;
+
+/** 交给模型的思考过程尾部长度上限：给足推理脉络，又不至于把整段思考重放一遍。 */
+const CONTINUE_REASONING_LIMIT = 2200;
 
 /** 一个回合内最多自动接续几次（创作模式给足，日常问答少给）。 */
 const AUTO_CONTINUE_CREATIVE = 4;
@@ -1638,9 +1684,17 @@ function resolveContinuation(
   const ctx: ContinuationContext = {
     tail: tailOnly ? full.slice(-CONTINUE_TAIL_LIMIT) : full,
     tailOnly,
+    /* 思考过程一样要带到续写：被中断时往往正推理到一半，正文可能还没落几行。
+       只给正文、不给推理，模型就看不到自己刚才想到哪一步。 */
+    reasoning: prev.ai.reasoning?.trim() || undefined,
+    reasoningTailOnly:
+      (prev.ai.reasoning?.trim().length ?? 0) > CONTINUE_REASONING_LIMIT ? true : undefined,
     request: prev.user ? plainUserText(prev.user, tab).trim() : "",
     truncated: !!prev.ai.incomplete,
   };
+  if (ctx.reasoning && ctx.reasoning.length > CONTINUE_REASONING_LIMIT) {
+    ctx.reasoning = ctx.reasoning.slice(-CONTINUE_REASONING_LIMIT);
+  }
 
   /* 创作指令是「每轮一次性」的，发送后胶囊已复位；续写这一轮必须把上一回合的
      模式原样接回来，否则模型会掉回日常对话守则、丢掉身份与字数约束。 */
@@ -1835,6 +1889,15 @@ async function streamAiReply(
   for (const m of targetMessages) {
     if (m.loading) continue;
     const content = m.content.trim();
+    /* 思考过程随历史一起携带：只有带上它，「继续」才能接回被中断时的推理脉络；
+       它只是给模型的衔接元信息，明确标注不属于正文、不得复述。 */
+    const reasoning = m.role === "assistant" ? (m.reasoning ?? "").trim() : "";
+    const hasReasoning = reasoning.length > 0;
+    const reasoningBlock = hasReasoning
+      ? `\n\n[上一轮思考过程 · 仅供衔接，不属于正文，不要向用户复述]\n${
+          reasoning.length > CONTINUE_REASONING_LIMIT ? reasoning.slice(-CONTINUE_REASONING_LIMIT) : reasoning
+        }`
+      : "";
     if (content.length > 0) {
       historyMsgs.push({
         role: m.role,
@@ -1842,8 +1905,19 @@ async function streamAiReply(
           m.role === "user" && m.slash
             ? `（本轮已启用「${m.slash.label}」创作模式）\n${m.content}`
             : m.role === "assistant" && m.incomplete
-            ? `${m.content}\n\n[系统标注：以上正文在此处被输出长度上限截断，尚未写完。这行标注不属于正文，不要复述。]`
-            : m.content,
+            ? `${m.content}\n\n[系统标注：以上正文在此处被输出长度上限截断，尚未写完。这行标注不属于正文，不要复述。]${reasoningBlock}`
+            : `${m.content}${reasoningBlock}`,
+      });
+      continue;
+    }
+    if (hasReasoning) {
+      /* 正文一个字都没吐出来、只在思考阶段被中断的消息：照样入历史，
+         让「继续」能看到思考断点，而不是把这一回合整体丢掉。 */
+      historyMsgs.push({
+        role: "assistant",
+        content: `[上一轮思考过程 · 仅供衔接，不属于正文，不要向用户复述]\n${
+          reasoning.length > CONTINUE_REASONING_LIMIT ? reasoning.slice(-CONTINUE_REASONING_LIMIT) : reasoning
+        }`,
       });
       continue;
     }
@@ -1881,8 +1955,10 @@ async function streamAiReply(
      读者评估页：除通用规则外，明确要求先通过工具把用户所指的正文读进来，
      再以「普通读者」视角点评——绝不凭空猜测内容。 */
   if (workspace.value === "docs") {
-    systemPrompt += `\n\n【文档编辑区工具（当前界面：文档）】你有 5 个工具可读写「文档」界面里的文档条目：list_documents / read_document / create_document / update_document / append_document。
+    systemPrompt += `\n\n【文档编辑区工具（当前界面：文档）】你有 8 个工具可读写「文档」界面里的文档条目：list_documents / read_document / read_documents / create_document / update_document / update_documents / append_document / append_documents，另有 run_document_task 子代理。
   · 用户说「分析/总结/审阅/评价这篇文档、当前文档、选中的文档、上面的正文」时，先调用 read_document（省略 title 即读用户当前打开的那一篇）把正文读进来，再基于真实正文作答，严禁凭空猜测内容。
+  · 同时处理多篇文档（汇总、对比、统稿、批量改写）时：只读场景优先用 read_documents 一次读入多篇；需要成批改写 / 追加时用 update_documents / append_documents，一次调用完成多篇，不要逐篇反复循环。
+  · 复杂的跨文档任务（整合、合并、按统一风格重写多篇、把多篇合成本文后存成新文档）优先调用 run_document_task 交给内置子代理一次完成——子代理会自己在独立回合里读改文档，只把结果汇报给你，避免正文反复回注把上下文撑爆。子代理回报后你只需把它的结论转述给用户即可，不必再重新读一遍原文。
   · 只有用户明确要求「改写/替换/润色这篇文档」才调用 update_document；明确要求「续写/追加」才调用 append_document。没有明确指示时一律只读不写。
   · 用户明确要求「新建/创建一篇文档」「把这些内容单独存成一篇新文档」时，调用 create_document 新建条目，不要用 update_document 覆盖现有文档。反之，用户要改的是已有文档时，也不要用 create_document 另建一篇。
   · 本界面下你接触不到、也不要提及写作画布的文本卡片；用户此刻说的「正文 / 这段 / 这篇」指的都是文档条目。${tab === "reader" ? `\n  · 你在「读者评估」页工作：用户的意图就是让你以普通读者视角评价正文，务必先用 read_document 把目标文档正文完整读进来（正文过长时分页读全），再依据真实内容点评。` : ""}`;
@@ -1901,6 +1977,20 @@ async function streamAiReply(
   else if (workspace.value === "cards") toolDefs.push(...cardToolDefinitions());
   if (scope && useKnowledgeTools) toolDefs.push(...knowledgeToolDefinitions(scope));
   if (aiSettings.webSearchEnabled) toolDefs.push(...webSearchToolDefinitions());
+  /* 文档界面额外挂「子代理」工具：跨多篇文档的复杂任务交给它在独立回合里
+     完成，只回报简短结果，避免正文反复回注导致上下文超长中断。 */
+  const documentSubAgent =
+    workspace.value === "docs"
+      ? makeDocumentSubAgentExecutor({
+          provider,
+          apiType: aiSettings.apiType,
+          apiKey,
+          url,
+          model,
+          signal,
+        })
+      : null;
+  if (documentSubAgent) toolDefs.push(documentSubAgentToolDefinition());
   const useTools = toolDefs.length > 0;
 
   /* 一个回合要交付完整正文：正文被输出长度上限截断时，runAgent 内部自动接着写，
@@ -1951,6 +2041,12 @@ async function streamAiReply(
                 }
                 return runDocTool(name, args);
               }
+              if (isDocumentSubAgentTool(name)) {
+                if (workspace.value !== "docs" || !documentSubAgent) {
+                  return `当前不在「文档」界面，${name} 不可用。`;
+                }
+                return documentSubAgent(args);
+              }
               if (isCardTool(name)) {
                 if (workspace.value !== "cards") {
                   return `当前不在「写作画布」界面，${name} 不可用。请只处理当前界面的内容。`;
@@ -1969,6 +2065,8 @@ async function streamAiReply(
         onToolCall: (call) => {
           const label = isDocTool(call.name)
             ? describeDocToolCall(call.name, call.args)
+            : isDocumentSubAgentTool(call.name)
+            ? describeDocumentSubAgentCall(call.name, call.args)
             : isCardTool(call.name)
             ? describeCardToolCall(call.name, call.args)
             : isWebSearchTool(call.name)
@@ -2445,6 +2543,54 @@ function handleComposerInput() {
       composerRef.value.style.height = Math.min(composerRef.value.scrollHeight, 150) + "px";
     }
   });
+}
+
+/* ---- AI写作「/」快捷指令（与对话页 / 创作指令完全独立） ---- */
+
+const quickCmdDraft = ref("");
+const quickCmdFilter = ref("");
+
+/** 按关键词过滤后的指令列表，携带各自在原始列表里的序号，删除时仍指向原条目。 */
+const filteredQuickCommands = computed(() => {
+  const keyword = quickCmdFilter.value.trim().toLowerCase();
+  const items = writerQuickCommands.value.map((text, index) => ({ text, index }));
+  if (!keyword) return items;
+  return items.filter((item) => item.text.toLowerCase().includes(keyword));
+});
+
+function toggleQuickCmdPopover() {
+  activePopover.value = activePopover.value === "quickcmd" ? null : "quickcmd";
+  /* 每次重新打开都清掉上一次的过滤词，避免看到一张“被筛掉一半”的列表。 */
+  if (activePopover.value === "quickcmd") quickCmdFilter.value = "";
+}
+
+/** 点选一条快捷指令：明文插入输入框（已有内容时另起一行），与正文混排。 */
+function insertQuickCommand(cmd: string) {
+  const text = cmd.trim();
+  if (!text) return;
+  const current = currentComposerText.value;
+  currentComposerText.value = current.trim() ? `${current.replace(/\s+$/, "")}\n${text}` : text;
+  activePopover.value = null;
+  nextTick(() => {
+    if (composerRef.value) {
+      composerRef.value.focus();
+      composerRef.value.style.height = "auto";
+      composerRef.value.style.height = Math.min(composerRef.value.scrollHeight, 150) + "px";
+    }
+  });
+}
+
+/** 新增一条自定义快捷指令并立即插入输入框。 */
+function submitQuickCommand() {
+  if (!quickCmdDraft.value.trim()) return;
+  const text = quickCmdDraft.value.trim();
+  addWriterQuickCommand(text);
+  quickCmdDraft.value = "";
+  insertQuickCommand(text);
+}
+
+function removeQuickCommand(index: number) {
+  removeWriterQuickCommand(index);
 }
 
 function formatFileSize(bytes: number): string {
@@ -3192,6 +3338,63 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="slash-foot">
                   选中后在指令后面写清需求即可；也可直接在输入框开头手打指令。不选则按日常对话回答。
+                </div>
+              </div>
+            </div>
+
+            <!-- 0b. AI写作「/」快捷指令 Popover（仅 AI写作 页）。
+                 与对话页的 / 创作指令完全独立：这里只是「明文文本」，
+                 点选后原样插入输入框正文，用于存放高频复用的写作要求。 -->
+            <div v-if="activeSidebarTab === 'writer'" class="popover-wrapper">
+              <button
+                class="icon-pill-btn slash-pill-btn"
+                :class="{ active: activePopover === 'quickcmd' }"
+                title="快捷指令（点选明文插入输入框，与对话的 / 创作指令无关）"
+                @click.stop="toggleQuickCmdPopover"
+              >
+                <Slash :size="15" />
+              </button>
+              <div v-if="activePopover === 'quickcmd'" class="popover-dropdown quickcmd-dropdown" @click.stop>
+                <div class="popover-title quickcmd-title-row">
+                  <span class="quickcmd-title-label">快捷指令</span>
+                  <input
+                    v-model="quickCmdFilter"
+                    class="quickcmd-search"
+                    type="text"
+                    placeholder="搜索指令…"
+                    @click.stop
+                    @keydown.stop
+                  />
+                </div>
+                <div class="quickcmd-options">
+                  <div v-if="filteredQuickCommands.length === 0" class="quickcmd-empty">
+                    {{ quickCmdFilter.trim() ? "没有匹配的指令" : "还没有快捷指令" }}
+                  </div>
+                  <div v-for="cmd in filteredQuickCommands" :key="cmd.index" class="quickcmd-option">
+                    <button class="quickcmd-item" :title="cmd.text" @click="insertQuickCommand(cmd.text)">
+                      {{ cmd.text }}
+                    </button>
+                    <button class="quickcmd-del" title="删除这条快捷指令" @click.stop="removeQuickCommand(cmd.index)">
+                      <X :size="12" :stroke-width="2" />
+                    </button>
+                  </div>
+                </div>
+                <div class="quickcmd-add">
+                  <input
+                    v-model="quickCmdDraft"
+                    class="quickcmd-input"
+                    placeholder="存一条常用指令…"
+                    @keydown.enter.prevent="submitQuickCommand"
+                  />
+                  <button class="quickcmd-add-btn" title="保存并插入输入框" @click="submitQuickCommand">
+                    <Plus :size="14" :stroke-width="2" />
+                  </button>
+                </div>
+                <div class="quickcmd-foot">
+                  与「对话」的 / 创作指令相互独立；点选后明文插入输入框，可自行增删。
+                  <button class="quickcmd-reset" title="恢复默认快捷指令" @click="resetWriterQuickCommands">
+                    恢复默认
+                  </button>
                 </div>
               </div>
             </div>
@@ -4782,6 +4985,175 @@ onBeforeUnmount(() => {
   font-size: 10px;
   line-height: 1.55;
   color: var(--on-surface-variant);
+}
+
+/* ---- AI写作「/」快捷指令下拉 ---- */
+
+.quickcmd-dropdown {
+  width: 320px;
+}
+
+.quickcmd-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quickcmd-title-label {
+  flex-shrink: 0;
+}
+
+.quickcmd-search {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--on-surface);
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  border-radius: 5px;
+  outline: none;
+}
+
+.quickcmd-search::placeholder {
+  color: var(--on-surface-variant);
+}
+
+.quickcmd-search:focus {
+  border-color: var(--primary);
+}
+
+.quickcmd-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.quickcmd-empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--on-surface-variant);
+  text-align: center;
+}
+
+.quickcmd-option {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-radius: 4px;
+}
+
+.quickcmd-option:hover {
+  background: var(--surface-container-high);
+}
+
+.quickcmd-item {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--on-surface);
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.quickcmd-del {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  color: var(--on-surface-variant);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.quickcmd-option:hover .quickcmd-del {
+  opacity: 1;
+}
+
+.quickcmd-del:hover {
+  color: var(--error);
+  background: var(--error-container);
+}
+
+.quickcmd-add {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 6px 0 0;
+  border-top: 1px solid var(--outline-variant);
+}
+
+.quickcmd-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--on-surface);
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  border-radius: 5px;
+  outline: none;
+}
+
+.quickcmd-input:focus {
+  border-color: var(--primary);
+}
+
+.quickcmd-add-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: var(--on-surface-variant);
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.quickcmd-add-btn:hover {
+  background: var(--primary);
+  color: var(--on-primary, #fff);
+}
+
+.quickcmd-foot {
+  padding: 6px 6px 2px;
+  border-top: 1px solid var(--outline-variant);
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--on-surface-variant);
+}
+
+.quickcmd-reset {
+  margin-top: 4px;
+  padding: 0;
+  font-size: 10px;
+  color: var(--primary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.quickcmd-reset:hover {
+  text-decoration: underline;
 }
 
 .composer-actions {

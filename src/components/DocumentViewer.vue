@@ -2541,7 +2541,13 @@ function textOffsetFromPoint(el: HTMLTextAreaElement, x: number, y: number): num
    只在真正的文档界面注册落点；嵌入式（画布卡片 / 拼接弹窗）不参与。 */
 
 const docDropTarget: DocEditorDropTarget | null = {
-  element: () => editorRef.value,
+  element: () => {
+    /* WYSIWYG 模式编辑区整块替换为 contenteditable，落点要跟着走：取滚动容器
+       作命中区域（整片纸面含留白都能命中），插入位置由 offsetAtPoint 精算；
+       markdown 模式照旧命中 textarea。 */
+    if (showWysiwyg.value) return wysiwygRef.value?.getScrollContainer() ?? null;
+    return editorRef.value;
+  },
   drop: (content, x, y) => insertAtDocDropPoint(content, x, y),
   docId: () => fileIdForSlot.value,
   /* 块拖拽 / 跨分栏块引用的落点：把整块内容插入到指定行。 */
@@ -2557,6 +2563,9 @@ const docDropTarget: DocEditorDropTarget | null = {
 
 /** 把拖入的内容插到松开位置附近的光标处，并把焦点 / 光标归位。 */
 function insertAtDocDropPoint(content: string, x: number, y: number): boolean {
+  /* WYSIWYG：换算成 markdown 偏移后插入，由组件重渲染并还原光标。 */
+  if (showWysiwyg.value) return insertAtWysiwygDropPoint(content, x, y);
+
   const el = editorRef.value;
   if (!el) return false;
   const offset = textOffsetFromPoint(el, x, y);
@@ -2568,6 +2577,21 @@ function insertAtDocDropPoint(content: string, x: number, y: number): boolean {
     const caret = Math.min(offset + content.length, el.value.length);
     el.setSelectionRange(caret, caret);
     caretPos.value = caret;
+  });
+  pulseAiDocEdit(fileIdForSlot.value);
+  return true;
+}
+
+/** WYSIWYG 编辑区的拖入落点：命中测试换算 markdown 偏移 → 插入 → 光标归位。 */
+function insertAtWysiwygDropPoint(content: string, x: number, y: number): boolean {
+  const w = wysiwygRef.value;
+  if (!w) return false;
+  const offset = w.offsetAtPoint(x, y);
+  if (offset === null) return false;
+  markdown.value = markdown.value.slice(0, offset) + content + markdown.value.slice(offset);
+  nextTick(() => {
+    w.setSelectionOffsets(offset + content.length, offset + content.length);
+    w.focusEditor();
   });
   pulseAiDocEdit(fileIdForSlot.value);
   return true;
@@ -4177,6 +4201,7 @@ onBeforeUnmount(() => {
           :spotlight-enabled="spotlightEnabled"
           :single-editor="props.singleEditor"
           :embedded="props.embedded"
+          :drag-hover="docDragHover"
           :find-highlight="findHighlight"
           @toggleZen="handleToggleZen"
           @toggleSpotlight="handleToggleSpotlight"

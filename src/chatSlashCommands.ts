@@ -136,11 +136,19 @@ export interface ContinuationContext {
   tail: string;
   /** tail 是否只是尾部截取（true 表示前面还有更多已写内容）。 */
   tailOnly: boolean;
+  /** 上一回合的思考过程（被中断时往往正思考到一半，一并交给模型衔接，
+      否则模型只看得见正文、看不见自己刚才推理到哪一步）。 */
+  reasoning?: string;
+  /** reasoning 是否只是尾部截取。 */
+  reasoningTailOnly?: boolean;
   /** 上一回合用户的需求原文（已摘掉指令词）。 */
   request: string;
   /** 上一回合的正文是否已被明确判定为「没写完」（被截断 / 被中止）。 */
   truncated: boolean;
 }
+
+/** 续写块内直接展示的思考过程长度上限（调用方一般已截断，这里兜底）。 */
+const CONTINUE_REASONING_INLINE_LIMIT = 2500;
 
 /** 续写块：所有分支共用的「怎么接」硬性约定。 */
 function continuationRules(ctx: ContinuationContext): string[] {
@@ -163,6 +171,21 @@ function continuationRules(ctx: ContinuationContext): string[] {
       "",
       "上一回合用户的需求原文（本轮继续为它服务，约束一字不变）：",
       ctx.request,
+    );
+  }
+
+  if (ctx.reasoning?.trim()) {
+    const longReasoning = ctx.reasoning.length > CONTINUE_REASONING_INLINE_LIMIT;
+    const shown = longReasoning ? ctx.reasoning.slice(-CONTINUE_REASONING_INLINE_LIMIT) : ctx.reasoning;
+    const isTail = longReasoning || ctx.reasoningTailOnly;
+    lines.push(
+      "",
+      isTail
+        ? "上一条回复的思考过程尾部（被中断时正思考到这段；仅供你衔接参考，接着这段思路继续推，不要把这段文字写进正文、也不要向用户复述）："
+        : "上一条回复的思考过程（仅供你衔接参考：你刚才就是沿着这条思路在推，接着往下想、并把结论写进正文；不要把这段文字写进正文、也不要向用户复述）：",
+      "  ---",
+      shown,
+      "  ---",
     );
   }
 

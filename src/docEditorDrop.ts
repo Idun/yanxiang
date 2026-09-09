@@ -10,8 +10,9 @@ import { reactive } from "vue";
  */
 
 export interface DocEditorDropTarget {
-  /** 可接收落点的文档编辑区 textarea（隐藏 / 卸载时返回 null）。 */
-  element: () => HTMLTextAreaElement | null;
+  /** 可接收落点的文档编辑区（markdown 的 textarea 或 WYSIWYG 的 contenteditable；
+      隐藏 / 卸载时返回 null）。 */
+  element: () => HTMLElement | null;
   /** 把 content 插入到 (x, y) 处最近的光标位置；插入成功返回 true。 */
   drop: (content: string, x: number, y: number) => boolean;
   /** 可选：所在文档的 id（供块拖拽跨分栏定位目标编辑区）。 */
@@ -73,7 +74,7 @@ export function unregisterDocEditorTarget(target: DocEditorDropTarget): void {
   targets.delete(target);
 }
 
-function hitTest(el: HTMLTextAreaElement, x: number, y: number): boolean {
+function hitTest(el: HTMLElement, x: number, y: number): boolean {
   const rect = el.getBoundingClientRect();
   /* 隐藏（非当前标签页）或被滚动出可视区时宽度/高度为 0，直接判定为未命中。 */
   if (rect.width === 0 || rect.height === 0) return false;

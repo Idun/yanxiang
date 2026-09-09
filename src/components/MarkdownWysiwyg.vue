@@ -62,6 +62,122 @@ function parseInlineWithSyntax(text: string): string {
   return res;
 }
 
+/* ---------------- 表格：解析 / 渲染 / 序列化 ---------------- */
+
+/** 拆分一个 markdown 表格行（去掉首尾 |，并按未转义的 | 切成单元格）。 */
+function splitTableRow(line: string): string[] {
+  let s = line.trim();
+  s = s.replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cur = "";
+  for (let k = 0; k < s.length; k++) {
+    const ch = s[k];
+    if (ch === "\\" && s[k + 1] === "|") {
+      cur += "|";
+      k++;
+      continue;
+    }
+    if (ch === "|") {
+      cells.push(cur.trim());
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+/** 分隔行单元格是否为合法的对齐标记（--- / :--- / ---: / :---:）。 */
+function isTableSepCell(cell: string): boolean {
+  return /^:?-{1,}:?$/.test(cell.trim());
+}
+
+/** 由分隔单元格推断列对齐。 */
+function tableAlignOf(sepCell: string): "center" | "right" | "left" | "" {
+  const s = sepCell.trim();
+  if (s.startsWith(":") && s.endsWith(":")) return "center";
+  if (s.endsWith(":")) return "right";
+  if (s.startsWith(":")) return "left";
+  return "";
+}
+
+interface TableBlockSpec {
+  headerCells: string[];
+  sepCells: string[];
+  bodyRows: string[][];
+  /** 最后被本张表消费掉的行下标。 */
+  lastIndex: number;
+}
+
+/** 判断 lines[i] 起是否是一张 markdown 表格，是则返回整张表的结构与末行下标。 */
+function parseTableAt(lines: string[], i: number): TableBlockSpec | null {
+  const header = lines[i];
+  /* 表头行必须带 |（行首或行尾至少一边）。 */
+  if (!/^\s*\|/.test(header) && !/\|\s*$/.test(header)) return null;
+  if (i + 1 >= lines.length) return null;
+  /* 下一行必须是含 | 的分隔行（单列 | --- | 也要认，裸 --- 不算表）。 */
+  const sepLine = lines[i + 1];
+  if (!/\|/.test(sepLine)) return null;
+  const sepCells = splitTableRow(sepLine);
+  if (sepCells.length < 1 || !sepCells.every(isTableSepCell)) return null;
+  const headerCells = splitTableRow(header);
+  const bodyRows: string[][] = [];
+  let j = i + 2;
+  while (j < lines.length && /^\s*\|.*\|/.test(lines[j])) {
+    bodyRows.push(splitTableRow(lines[j]));
+    j++;
+  }
+  return { headerCells, sepCells, bodyRows, lastIndex: j - 1 };
+}
+
+/** 表格单元格行内 HTML：管道以 .md-syntax 呈现（失焦隐藏、聚焦暴露），
+    内容落在 .md-content 里可原地编辑，列对齐以行内样式作用于内容。 */
+function tableCellHtml(content: string, isFirst: boolean, isLast: boolean, align: string): string {
+  const alignAttr = align ? ` style="text-align:${align}"` : "";
+  const leading = isFirst ? "| " : " |";
+  const trailing = isLast ? " |" : "";
+  const parts = [`<span class="md-syntax">${leading}</span>`];
+  parts.push(`<span class="md-content"${alignAttr}>${parseInlineWithSyntax(content)}</span>`);
+  if (trailing) parts.push(`<span class="md-syntax">${trailing}</span>`);
+  return parts.join("");
+}
+
+/** 把一张表编译成单个 .md-block 块（表头 / 分隔行 / 数据行）。 */
+function buildTableHtml(spec: TableBlockSpec): string {
+  const colCount = Math.max(spec.headerCells.length, ...spec.bodyRows.map((r) => r.length), 1);
+  const headerRow = spec.headerCells
+    .map((c, idx) => {
+      const align = tableAlignOf(spec.sepCells[idx] ?? "");
+      const isLast = idx === colCount - 1;
+      return `<th class="md-tbl-cell">${tableCellHtml(c, idx === 0, isLast, align)}</th>`;
+    })
+    .join("");
+  const sepLine = `| ${spec.sepCells.join(" | ")} |`;
+  const bodyRowsHtml = spec.bodyRows
+    .map((row) => {
+      const cells = row
+        .map((c, idx) => {
+          const align = tableAlignOf(spec.sepCells[idx] ?? "");
+          const isLast = idx === colCount - 1;
+          return `<td class="md-tbl-cell">${tableCellHtml(c, idx === 0, isLast, align)}</td>`;
+        })
+        .join("");
+      return `<tr class="md-tbl-row">${cells}</tr>`;
+    })
+    .join("");
+  return (
+    `<div class="md-block md-table" data-block-type="table">` +
+    `<table>` +
+    `<thead><tr class="md-tbl-head">${headerRow}</tr></thead>` +
+    `<tbody>` +
+    `<tr class="md-tbl-sep"><td class="md-tbl-sep-cell" colspan="${colCount}"><span class="md-syntax">${escapeHtml(sepLine)}</span></td></tr>` +
+    bodyRowsHtml +
+    `</tbody>` +
+    `</table></div>`
+  );
+}
+
 /** 将 Markdown 源码编译为支持“原地编辑与语法暴露”的 Live HTML */
 export function markdownToLiveHtml(md: string): string {
   if (!md || !md.trim()) {
@@ -97,6 +213,14 @@ export function markdownToLiveHtml(md: string): string {
 
     if (inCodeFence) {
       codeFenceLines.push(line);
+      continue;
+    }
+
+    // 表格：表头 + 分隔行 + 连续正文行，整张渲染成一个块（光标可逐格编辑）。
+    const tableSpec = parseTableAt(lines, i);
+    if (tableSpec) {
+      blockHtmls.push(buildTableHtml(tableSpec));
+      i = tableSpec.lastIndex;
       continue;
     }
 
@@ -311,6 +435,33 @@ export function serializeLiveBlock(block: HTMLElement): string {
     return `${num}. ${inner}`;
   }
 
+  if (type === "table" || block.classList.contains("md-table")) {
+    const headRow = block.querySelector(":scope > table > thead > tr.md-tbl-head");
+    const sepRow = block.querySelector(":scope > table > tbody > tr.md-tbl-sep");
+    const bodyRows = block.querySelectorAll(":scope > table > tbody > tr.md-tbl-row");
+    const headCells = headRow ? Array.from(headRow.querySelectorAll(":scope > th.md-tbl-cell")) : [];
+    const cellText = (cell: Element): string =>
+      ((serializeInlineChildren((cell.querySelector(":scope > .md-content") || cell) as HTMLElement) || "")
+        .trim()
+        /* 防御：单元格里若混入软换行，压成空格，避免拆坏表格行。 */
+        .replace(/\r?\n/g, " "));
+    /* 单元格内容里的竖线必须转义，否则还原后会被当成新列。 */
+    const escapePipe = (t: string) => t.replace(/\|/g, "\\|");
+    const sepCells = sepRow
+      ? splitTableRow(sepRow.querySelector(".md-syntax")?.textContent || "")
+      : headCells.map(() => "---");
+    const lines: string[] = [];
+    if (headCells.length > 0) {
+      lines.push(`| ${headCells.map((c) => escapePipe(cellText(c))).join(" | ")} |`);
+    }
+    lines.push(`| ${sepCells.join(" | ")} |`);
+    for (const row of Array.from(bodyRows)) {
+      const cells = Array.from(row.querySelectorAll(":scope > td.md-tbl-cell"));
+      lines.push(`| ${cells.map((c) => escapePipe(cellText(c))).join(" | ")} |`);
+    }
+    return lines.join("\n");
+  }
+
   // 普通段落
   const contentEl = (block.querySelector(".md-content") || block) as HTMLElement;
   return serializeInlineChildren(contentEl).trim();
@@ -501,13 +652,14 @@ export function selectRawRange(root: HTMLElement, start: number, end: number) {
 </script>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { GripVertical, Palette, X } from "lucide-vue-next";
 import {
   applyContentColoring,
   contentColorCssVars,
   contentColoringOn,
 } from "../contentColoring";
+import { contentScrollMax, typewriterRunwayPx, typewriterTargetTop } from "../typewriterScroll";
 import {
   computeDeletePairCorrection,
   computeInsertPairCorrection,
@@ -541,6 +693,8 @@ const props = withDefaults(
     spotlightEnabled?: boolean;
     singleEditor?: boolean;
     embedded?: boolean;
+    /** AI 回复拖入编辑区时的悬浮高亮（与 markdown 编辑区同一套视觉）。 */
+    dragHover?: boolean;
     /** 查找高亮状态（由上层传入）：查找框开着且有词时，在编辑区内逐处包裹命中。 */
     findHighlight?: { open: boolean; text: string; caseSensitive: boolean; index: number } | null;
   }>(),
@@ -556,6 +710,7 @@ const props = withDefaults(
     spotlightEnabled: false,
     singleEditor: false,
     embedded: false,
+    dragHover: false,
     findHighlight: null,
   },
 );
@@ -634,6 +789,9 @@ const targetInsertionTopPx = ref(0);
 
 const scrollProgress = ref(0);
 
+/** 打字机滚动的末尾跑道：正文最后一行也能被滚到编辑区中部（见 typewriterScroll）。 */
+const editorRunwayPx = ref(0);
+
 const currentDocTitle = computed(() => {
   return documentFilesStore.files.find((f) => f.id === props.fileId)?.title || "未命名文档";
 });
@@ -642,7 +800,10 @@ const currentDocTitle = computed(() => {
 function compileLiveHtml(md: string): string {
   let html = markdownToLiveHtml(md);
   if (contentColoringOn.value) {
-    html = applyContentColoring(html);
+    /* WYSIWYG 是一行一段的块级结构：开启块级状态重置，未闭合的引号只困在
+       它所在的那一段里，不会把后续段落全部染成引号色（markdown 预览保持
+       原来的「跨段贯穿」诊断行为）。 */
+    html = applyContentColoring(html, { resetAtBlocks: true });
   }
   return html;
 }
@@ -1052,6 +1213,9 @@ function applyFindHighlight() {
 /** 当前块结构是否与「按类型重建的标记」一致（没动过语法）。 */
 function isBlockStructConsistent(block: HTMLElement): boolean {
   if (block.classList.contains("md-code-block")) return true;
+  /* 表格由自身的多行序列化器维护（可见文本 = 压平的竖线流，与多行 markdown
+     必然不等），这里一律视为结构一致，不参与「扁平串」比较。 */
+  if (block.classList.contains("md-table")) return true;
   /* 空行块一旦被浏览器塞进了真实文本，应规范化为普通段落（去掉 md-empty），
      否则会一直顶着空行的占位样式。 */
   if (block.classList.contains("md-empty") && liveNodeRawText(block)) return false;
@@ -1092,6 +1256,15 @@ function reRenderFocusedBlockAs(block: HTMLElement, raw: string) {
 function repairFocusedBlock() {
   const block = focusedBlockEl();
   if (!block || block.classList.contains("md-code-block")) return;
+
+  /* 表格不能拿「可见文本」的扁平串重渲染（会丢行结构）；要重渲染时必须走
+     自身的多行序列化器，只在内容上色开启时刷新配色。 */
+  if (block.classList.contains("md-table")) {
+    if (contentColoringOn.value) {
+      reRenderFocusedBlockAs(block, serializeLiveBlock(block));
+    }
+    return;
+  }
 
   const raw = liveNodeRawText(block);
   const consistent = isBlockStructConsistent(block);
@@ -1141,7 +1314,7 @@ function onEditorBeforeInput(e: Event) {
   }
   const editor = editorRef.value;
   const block = focusedBlockEl();
-  if (!editor || !block || block.classList.contains("md-code-block")) {
+  if (!editor || !block || block.classList.contains("md-code-block") || block.classList.contains("md-table")) {
     pairSnap = null;
     return;
   }
@@ -1200,7 +1373,7 @@ function handleAutoPair(e?: Event): boolean {
 
   const block = focusedBlockEl();
   const editor = editorRef.value;
-  if (!block || !editor || block.classList.contains("md-code-block")) return false;
+  if (!block || !editor || block.classList.contains("md-code-block") || block.classList.contains("md-table")) return false;
 
   const ie = e instanceof InputEvent ? e : null;
   if (!ie || ie.isComposing) return false;
@@ -1265,6 +1438,7 @@ function onInput(e?: Event) {
     if (handleAutoPair(e)) {
       suppressRepair = false;
       updateFocusState();
+      void nextTick(applyTypewriterScroll);
       return;
     }
     repairFocusedBlock();
@@ -1272,6 +1446,8 @@ function onInput(e?: Event) {
   suppressRepair = false;
   syncDomToModel();
   updateFocusState();
+  /* 内容真的变了：把正在写的那一行保持在编辑区中部（打字机滚动）。 */
+  if (!composing) void nextTick(applyTypewriterScroll);
 }
 
 /** 把一行 Markdown 编译成单个独立块元素（供回车拆段复用解析逻辑）。 */
@@ -1360,8 +1536,18 @@ function onEnterKey() {
 
 /** 键盘交互 */
 function onKeydown(e: KeyboardEvent) {
-  // Enter（不含 Shift/Ctrl，且非中文组合输入确认）：按块拆段 / 换出新空行
-  if (e.key === "Enter" && !e.isComposing && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+  // Enter（不含 Ctrl/Meta/Alt，且非中文组合输入确认）：
+  //  · 在表格单元格里（含 Shift+Enter）→ 移到下一个单元格，最后格追加一行，
+  //    绝不往单元格里塞 <br>（那会让序列化出的行内出现换行、拆坏表格）；
+  //  · 段落里 Shift+Enter → 浏览器默认软换行；
+  //  · 段落里回车 → 按块拆段 / 换出新空行。
+  if (e.key === "Enter" && !e.isComposing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (caretInTable()) {
+      e.preventDefault();
+      moveCaretInTableToNextCell();
+      return;
+    }
+    if (e.shiftKey) return;
     e.preventDefault();
     onEnterKey();
     return;
@@ -1432,6 +1618,52 @@ function docOffsetOfBlock(block: HTMLElement): number {
   return acc;
 }
 
+/** 视口坐标 → 最近的 DOM 插入点 Range。WebView 无 caretRangeFromPoint 时退回标准 API。 */
+function caretRangeAtPoint(x: number, y: number): Range | null {
+  if (typeof document.caretRangeFromPoint === "function") {
+    return document.caretRangeFromPoint(x, y);
+  }
+  const d = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+  };
+  const pos = d.caretPositionFromPoint?.(x, y);
+  if (!pos) return null;
+  const range = document.createRange();
+  range.setStart(pos.offsetNode, pos.offset);
+  range.collapse(true);
+  return range;
+}
+
+/**
+ * 视口坐标 (x, y) 处的 markdown 文本偏移。
+ *
+ * 供「AI 回复拖入 WYSIWYG 编辑区」把松手点换算成插入位置：先用浏览器命中
+ * 测试拿到最近的 DOM 插入点，再按块内可见文本偏移 + 块在全文中的起始偏移，
+ * 得到与 textarea 同一套数值的 markdown 绝对偏移。
+ * 拿不到插入点 / 落点不在编辑区内返回 null。
+ */
+function offsetAtPoint(x: number, y: number): number | null {
+  const editor = editorRef.value;
+  if (!editor) return null;
+  const range = caretRangeAtPoint(x, y);
+  if (!range || !editor.contains(range.startContainer)) return null;
+
+  let node: Node | null = range.startContainer;
+  let block: HTMLElement | null = null;
+  while (node && node !== editor) {
+    if (node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).classList.contains("md-block")) {
+      block = node as HTMLElement;
+      break;
+    }
+    node = node.parentNode;
+  }
+  /* 落点正好卡在块与块之间的空隙、没命中任何块时，按编辑器末尾处理。 */
+  if (!block) return props.modelValue.length;
+
+  const inner = rawOffsetAt(block, range.startContainer, range.startOffset);
+  return Math.min(props.modelValue.length, docOffsetOfBlock(block) + inner);
+}
+
 /**
  * 光标是否落在代码区（行内 `code` 或 ``` 代码块）里。
  * 这些位置的粘贴交给浏览器默认行为：文本直接落进 <code>，序列化无损；
@@ -1454,6 +1686,90 @@ function caretInCode(): boolean {
   return false;
 }
 
+/** 光标是否落在表格单元格里（表格的编辑与普通段落不同：不能整块重渲染）。 */
+function caretInTable(): boolean {
+  return focusedTableCellEl() !== null;
+}
+
+/** 光标所在的表格单元格（含表头 th 与数据行 td）；不在单元格内返回 null。 */
+function focusedTableCellEl(): HTMLElement | null {
+  const editor = editorRef.value;
+  const sel = window.getSelection();
+  if (!editor || !sel || sel.rangeCount === 0) return null;
+  const container = sel.getRangeAt(0).commonAncestorContainer;
+  let node: Node | null = container.nodeType === Node.TEXT_NODE ? container.parentNode : container;
+  while (node && node !== editor) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node as HTMLElement;
+      if (el.classList.contains("md-tbl-cell")) return el;
+      if (el.classList.contains("md-block")) return null;
+    }
+    node = node.parentNode;
+  }
+  return null;
+}
+
+/** 光标落进某个单元格的 md-content 起始处。 */
+function placeCaretInCell(cell: HTMLElement) {
+  const content = cell.querySelector(":scope > .md-content");
+  const sel = window.getSelection();
+  if (!sel) return;
+  const target = (content?.firstChild as Node) || content || cell;
+  const range = document.createRange();
+  range.setStart(target, 0);
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+/** 表格里回车：光标移到下一个单元格；已在最后单元格则追加一行新行。 */
+function moveCaretInTableToNextCell() {
+  const editor = editorRef.value;
+  const current = focusedTableCellEl();
+  if (!editor || !current) return;
+  const cells = Array.from(editor.querySelectorAll(".md-tbl-cell")) as HTMLElement[];
+  const idx = cells.indexOf(current);
+  if (idx !== -1 && idx + 1 < cells.length) {
+    placeCaretInCell(cells[idx + 1]);
+  } else {
+    appendTableRow(current);
+  }
+}
+
+/** 在表格末尾追加一行空数据行（列数与表头一致），并落光标到首格。 */
+function appendTableRow(anyCell: HTMLElement) {
+  const table = anyCell.closest("table");
+  if (!table) return;
+  const headCells = table.querySelectorAll("thead th.md-tbl-cell");
+  const colCount = Math.max(1, headCells.length);
+  const row = document.createElement("tr");
+  row.className = "md-tbl-row";
+  for (let k = 0; k < colCount; k++) {
+    const td = document.createElement("td");
+    td.className = "md-tbl-cell";
+    const isFirst = k === 0;
+    const isLast = k === colCount - 1;
+    const s1 = document.createElement("span");
+    s1.className = "md-syntax";
+    s1.textContent = isFirst ? "| " : " |";
+    td.appendChild(s1);
+    const content = document.createElement("span");
+    content.className = "md-content";
+    td.appendChild(content);
+    if (isLast) {
+      const s2 = document.createElement("span");
+      s2.className = "md-syntax";
+      s2.textContent = " |";
+      td.appendChild(s2);
+    }
+    row.appendChild(td);
+  }
+  const tbody = table.querySelector("tbody");
+  if (tbody) tbody.appendChild(row);
+  placeCaretInCell(row.querySelector("td.md-tbl-cell") as HTMLElement);
+  syncDomToModel();
+}
+
 /**
  * 粘贴处理。
  *
@@ -1470,6 +1786,13 @@ function onPaste(e: ClipboardEvent) {
   /* 代码区粘贴走浏览器默认行为（见 caretInCode）。 */
   if (caretInCode()) return;
   e.preventDefault();
+  /* 表格单元格粘贴：直接把纯文本插进单元格（换行压成空格），不走整块重渲染，
+     否则会把表格的竖线流拆成段落、破坏表格结构。 */
+  if (caretInTable()) {
+    document.execCommand("insertText", false, text.replace(/\r?\n/g, " "));
+    syncDomToModel();
+    return;
+  }
   insertMarkdownAtCaret(text);
 }
 
@@ -1481,6 +1804,12 @@ function insertMarkdownAtCaret(text: string) {
   const range = sel.getRangeAt(0);
   const block = focusedBlockEl();
   if (!editor.contains(range.commonAncestorContainer)) return;
+  /* 表格单元格里的拖入 / 程序化插入：同样直接落进单元格，不重渲染整块。 */
+  if (block?.classList.contains("md-table")) {
+    document.execCommand("insertText", false, text.replace(/\r?\n/g, " "));
+    syncDomToModel();
+    return;
+  }
 
   const start = block ? rawOffsetAt(block, range.startContainer, range.startOffset) : 0;
   const end = block ? Math.max(start, rawOffsetAt(block, range.endContainer, range.endOffset)) : 0;
@@ -1593,6 +1922,8 @@ function wrapSelection(before: string, after = before, placeholder = "文本") {
   ensureEditorFocus();
   const block = blockOfRange(range);
   if (!block) return;
+  /* 表格按多行结构序列化，扁平串包裹会拆坏行结构，单元格内暂不支持行内标记。 */
+  if (block.classList.contains("md-table")) return;
   const raw = liveNodeRawText(block);
   const start = rawOffsetAt(block, range.startContainer, range.startOffset);
   const end = Math.max(start, rawOffsetAt(block, range.endContainer, range.endOffset));
@@ -1610,6 +1941,8 @@ function applyLineStyle(style: WysiwygLineStyle) {
   ensureEditorFocus();
   const block = blockOfRange(range);
   if (!block) return;
+  /* 表格是多行结构，行级标记（# / - / >）不能套在整张表上。 */
+  if (block.classList.contains("md-table")) return;
   const raw = liveNodeRawText(block);
   const current = lineStyleOfRaw(raw);
   const body = stripLineStyleRaw(raw);
@@ -1652,6 +1985,8 @@ function insertLink() {
   ensureEditorFocus();
   const block = blockOfRange(range);
   if (!block) return;
+  /* 表格单元格内暂不支持行内链接（扁平串重渲染会拆坏表格结构）。 */
+  if (block.classList.contains("md-table")) return;
   const raw = liveNodeRawText(block);
   const start = rawOffsetAt(block, range.startContainer, range.startOffset);
   const end = Math.max(start, rawOffsetAt(block, range.endContainer, range.endOffset));
@@ -1852,10 +2187,59 @@ function onGlobalDragMouseUp() {
 
 /* ---------------- 阅读进度与圆环 ---------------- */
 
+/** 打字机滚动：末尾跑道 + 舒适带。与 markdown 编辑区同一套参数与口径。 */
+function refreshEditorRunway() {
+  const el = scrollRef.value;
+  if (!el) {
+    editorRunwayPx.value = 0;
+    return;
+  }
+  const lh = props.fontSize * props.lineHeight;
+  /* 纸面本来就有固定留白（上 marginY+18、下 96）。跑道叠在下留白上，两者相加
+     若超过可视高度，min-height:100% 的纸面会被撑高，空文档也凭空多出滚动条。 */
+  const room = Math.max(0, el.clientHeight - (props.marginY + 18 + 96));
+  editorRunwayPx.value = Math.min(typewriterRunwayPx(el, lh), room);
+}
+
+/** 光标行顶相对滚动容器内容顶部的坐标（供打字机滚动换算锚点）。 */
+function caretLineTopInScroll(scrollEl: HTMLElement): number | null {
+  const editor = editorRef.value;
+  const sel = window.getSelection();
+  if (!editor || !sel || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (!editor.contains(range.startContainer)) return null;
+  const rects = range.getClientRects();
+  const rect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+  if (!rect || rect.height <= 0) return null;
+  const sRect = scrollEl.getBoundingClientRect();
+  return rect.top - sRect.top + scrollEl.scrollTop;
+}
+
+/**
+ * 打字机滚动：写完当前行后把「正在写的那一行」稳定停在编辑区中部。
+ * 与 markdown 编辑区同款体验 —— 末尾不再贴着底边接续，而是在中部继续写。
+ * 只在内容真的变化时调用（input），点击 / 方向键 / 选中都不该把画面拽走。
+ */
+async function applyTypewriterScroll() {
+  const el = scrollRef.value;
+  if (!el) return;
+  const before = editorRunwayPx.value;
+  refreshEditorRunway();
+  /* 跑道写成纸面 padding，值有变化时必须等它落到 DOM 再量，否则这一轮拿到的
+     还是「没有跑道」的 scrollHeight，末尾几行推不到中部。 */
+  if (editorRunwayPx.value !== before) await nextTick();
+  const caretTop = caretLineTopInScroll(el);
+  if (caretTop === null) return;
+  const next = typewriterTargetTop(el, caretTop, props.fontSize * props.lineHeight);
+  if (next === null) return;
+  el.scrollTop = next;
+}
+
 function onScroll() {
   const el = scrollRef.value;
   if (!el) return;
-  const max = el.scrollHeight - el.clientHeight;
+  /* 正文段余量 = 总余量 - 末尾跑道，进度 100% 仍表示「正文最后一行贴到底边」。 */
+  const max = contentScrollMax(el, editorRunwayPx.value);
   scrollProgress.value = max <= 0 ? 0 : Math.min(1, el.scrollTop / max);
   /* scroll 事件不冒泡，主动转发给上层，让选中工具栏跟随重定位。 */
   emit("scroll");
@@ -1899,7 +2283,9 @@ const paperCardStyle = computed(() => {
     "--ed-line-height-px": (props.fontSize * props.lineHeight).toFixed(2) + "px",
     "--ed-pad-y": props.marginY + "px",
     "--ed-pad-x": padX,
-    padding: `${props.marginY + 18}px ${padX} 96px ${padX}`,
+    /* 底部在固定留白上再叠一段末尾跑道（打字机滚动），末尾最后一行也能
+       被滚到编辑区中部，与 markdown 编辑区 / 预览同一套观感。 */
+    padding: `${props.marginY + 18}px ${padX} calc(96px + ${editorRunwayPx.value}px) ${padX}`,
   };
 });
 
@@ -1968,16 +2354,32 @@ watch(
   },
 );
 
+/* 字号 / 行距 / 边距 / 窗格尺寸变化会改变可视高度与行高，末尾跑道随之重算。 */
+watch(
+  () => [props.fontSize, props.lineHeight, props.marginY],
+  () => {
+    void nextTick(refreshEditorRunway);
+  },
+);
+
+function onWindowResize() {
+  refreshEditorRunway();
+}
+
 onMounted(() => {
   if (editorRef.value) {
     editorRef.value.innerHTML = compileLiveHtml(props.modelValue);
     applyFindHighlight();
   }
   document.addEventListener("selectionchange", updateFocusState);
+  window.addEventListener("resize", onWindowResize);
+  /* 首帧量一次跑道（依赖滚动容器的真实高度与行高）。 */
+  void nextTick(refreshEditorRunway);
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("selectionchange", updateFocusState);
+  window.removeEventListener("resize", onWindowResize);
   window.removeEventListener("mousemove", onGlobalDragMove, true);
   window.removeEventListener("mouseup", onGlobalDragMouseUp, true);
 });
@@ -2138,6 +2540,7 @@ defineExpose({
   pasteSelection,
   deleteSelection,
   selectAllEditor,
+  offsetAtPoint,
 });
 </script>
 
@@ -2212,6 +2615,7 @@ defineExpose({
             'first-line-indent': aiSettings.firstLineIndent,
             'drop-cap': aiSettings.dropCap,
             'spotlight-on': props.spotlightEnabled,
+            'doc-drag-hover': props.dragHover,
             ['grid-line-' + aiSettings.editorGridLine]: aiSettings.editorGridLine !== 'none',
           }"
           :style="readingViewStyle"
@@ -2393,6 +2797,13 @@ defineExpose({
   pointer-events: none;
 }
 
+/* AI 回复拖入编辑区时的悬浮高亮（与 markdown 编辑区同一套视觉）。 */
+.wysiwyg-editor.doc-drag-hover {
+  box-shadow: inset 0 0 0 2px rgb(var(--primary-rgb) / 0.7);
+  background: rgb(var(--primary-rgb) / 0.04);
+  transition: box-shadow 0.12s ease, background 0.12s ease;
+}
+
 /* ---------------- 块级排版：补齐 div 承载块的垂直节奏 ----------------
 
    全局 style.css 里的 .reading-view 排版规则是按语义标签写的（p / h1–h6 /
@@ -2509,6 +2920,48 @@ defineExpose({
 :deep(.md-code-block code) {
   display: block;
   white-space: pre-wrap;
+}
+
+/* ---------------- 表格：渲染成真正的 <table> ----------------
+   分隔行默认隐藏（表格边框已给出表头 / 正文分界），聚焦时暴露 | --- | 语法；
+   单元格内管道以 .md-syntax 呈现，与其它块级语法同样的「失焦隐藏、聚焦暴露」。 */
+:deep(.md-table) {
+  margin: 1.2em 0;
+}
+
+:deep(.md-table table) {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+:deep(.md-table th),
+:deep(.md-table td) {
+  border: 1px solid var(--reading-border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+:deep(.md-table th) {
+  background: var(--surface-container-low);
+  font-weight: 600;
+}
+
+:deep(.md-table .md-content) {
+  display: inline;
+}
+
+:deep(.md-table .md-tbl-sep) {
+  display: none;
+}
+
+:deep(.md-table.is-focused .md-tbl-sep) {
+  display: table-row;
+}
+
+:deep(.md-table .md-tbl-sep-cell) {
+  padding: 0 10px;
+  font-size: 0.9em;
 }
 
 /* 首个块不带上间距，末块不带下间距，纸面上下留白由 paper-card 统一负责。 */

@@ -22,9 +22,12 @@ import type { ToolDefinition } from "./knowledgeTools";
 export const DOC_TOOL_NAMES = [
   "list_documents",
   "read_document",
+  "read_documents",
   "create_document",
   "update_document",
+  "update_documents",
   "append_document",
+  "append_documents",
 ] as const;
 export type DocToolName = (typeof DOC_TOOL_NAMES)[number];
 
@@ -34,6 +37,9 @@ export function isDocTool(name: string): name is DocToolName {
 
 const DEFAULT_READ_LIMIT = 400;
 const MAX_READ_LIMIT = 2000;
+/* 批量读取：单篇上限与全部篇目合计上限都要卡，避免一次把太多正文塞进上下文。 */
+const BATCH_READ_PER_DOC = 200;
+const BATCH_READ_MAX_TOTAL = 600;
 
 function normalize(title: string): string {
   return title.trim().toLowerCase().replace(/\s+/g, "").replace(/\.(md|markdown|txt)$/i, "");
@@ -222,6 +228,76 @@ export function docToolDefinitions(): ToolDefinition[] {
         required: ["content"],
       },
     },
+    {
+      name: "read_documents",
+      description:
+        "一次读取**多篇**文档的正文（各带行号，按每篇行数上限截取）。需要同时处理多篇文档（汇总、对比、统稿、把多篇合并分析）时用它代替多次 read_document，既省轮次又控制上下文总量。titles 省略或为空时只读用户当前打开的那一篇。",
+      parameters: {
+        type: "object",
+        properties: {
+          titles: {
+            type: "array",
+            items: { type: "string" },
+            description: "要读取的文档标题数组（支持模糊匹配）。省略或为空时读取用户当前打开的那一篇。",
+          },
+          limit: {
+            type: "integer",
+            description: `每篇最多读取的行数，默认 ${BATCH_READ_PER_DOC}。`,
+          },
+          max_total: {
+            type: "integer",
+            description: `全部篇目合计最多读取的行数，默认 ${BATCH_READ_MAX_TOTAL}，超出部分返回提示供继续读取。`,
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: "update_documents",
+      description:
+        "整篇替换**多篇**已存在文档的正文，一次调用可同时改写多篇（docs 数组的每一项为 { title, content }）。仅在用户明确要求「同时改写 / 批量替换 / 把这几篇都改成」时调用；未明确指示不得擅自改动。不要用它新建文档。",
+      parameters: {
+        type: "object",
+        properties: {
+          docs: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                title: { type: "string", description: "目标文档标题（模糊匹配）" },
+                content: { type: "string", description: "替换后的完整正文" },
+              },
+              required: ["title", "content"],
+            },
+            description: "要替换的文档列表",
+          },
+        },
+        required: ["docs"],
+      },
+    },
+    {
+      name: "append_documents",
+      description:
+        "在**多篇**已存在文档的正文末尾各追加一段内容（不动原有正文），一次调用可同时续写多篇（docs 数组的每一项为 { title, content }）。仅在用户明确要求「给这几篇都补上 / 批量续写」时调用。",
+      parameters: {
+        type: "object",
+        properties: {
+          docs: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                title: { type: "string", description: "目标文档标题（模糊匹配）" },
+                content: { type: "string", description: "要追加的内容" },
+              },
+              required: ["title", "content"],
+            },
+            description: "要追加的文档列表",
+          },
+        },
+        required: ["docs"],
+      },
+    },
   ];
 }
 
@@ -344,14 +420,122 @@ function runAppend(args: Record<string, unknown>): string {
   return `已在文档「${file.title}」末尾追加 ${chars(content)} 字，现共 ${chars(file.content)} 字。`;
 }
 
+/** 把模型给的引用规整成字符串数组：既认 titles: string[]，也认逗号分隔/单值。 */
+function refsFrom(args: Record<string, unknown>, key: string): string[] {
+  const raw = args[key];
+  if (Array.isArray(raw)) return raw.map((r) => String(r ?? "").trim()).filter(Boolean);
+  if (typeof raw === "string") {
+    return raw
+      .split(/[,，;；]/)
+      .map((r) => r.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function runReadMany(args: Record<string, unknown>): string {
+  const refs = refsFrom(args, "titles").concat(refsFrom(args, "title")).concat(refsFrom(args, "docs"));
+  const perDoc = clampInt(args.limit, BATCH_READ_PER_DOC, 1, BATCH_READ_PER_DOC);
+  const totalCap = clampInt(args.max_total, BATCH_READ_MAX_TOTAL, 1, BATCH_READ_MAX_TOTAL * 2);
+
+  /* 没给标题 → 读用户当前打开的那一篇。 */
+  let files: DocFileItem[] = [];
+  if (refs.length > 0) {
+    for (const ref of refs) {
+      const file = resolveDoc(ref);
+      if (file) files.push(file);
+      else files.push({
+        id: `__missing_${ref}`,
+        folderId: null,
+        title: `【未找到】${ref}`,
+        content: "",
+        createdAt: 0,
+      });
+    }
+  } else {
+    const cur = resolveDoc();
+    if (cur) files = [cur];
+  }
+  if (files.length === 0) return "文档界面里还没有任何文档条目。";
+
+  /* 按 id 去重（同一篇可能被多个别名命中）。 */
+  const unique = [...new Map(files.filter((f) => !f.id.startsWith("__missing_")).map((f) => [f.id, f])).values()];
+  const missing = files.filter((f) => f.id.startsWith("__missing_"));
+
+  let budget = totalCap;
+  const parts: string[] = [];
+  for (const file of unique) {
+    if (budget <= 0) break;
+    const all = lines(file.content);
+    if (!all.some((l) => l.trim())) {
+      parts.push(`文档「${file.title}」目前是空的，没有正文可读。`);
+      continue;
+    }
+    const take = Math.max(1, Math.min(all.length, perDoc, budget));
+    budget -= take;
+    const body = all.slice(0, take).map((line, i) => `${i + 1}: ${line}`).join("\n");
+    const truncatedNote =
+      all.length > take ? `\n[还有 ${all.length - take} 行未读取，可用 read_document 继续: offset=${take + 1}]` : "";
+    parts.push(`文档「${file.title}」（共 ${all.length} 行 / ${chars(file.content)} 字，本次前 ${take} 行）\n---\n${body}${truncatedNote}`);
+  }
+
+  const missingNote =
+    missing.length > 0
+      ? `\n\n未找到的文档：${missing.map((f) => f.title.replace("【未找到】", "")).join("、")}\n当前可用文档：\n${availableDocs()}`
+      : "";
+  if (parts.length === 0 && missingNote) return missingNote.trim();
+  if (parts.length === 0) return "所选文档都没有可读内容。";
+  return parts.join("\n\n===\n\n") + missingNote;
+}
+
+/** 把 docs 数组里每一项解析成 { ref, content }，逐篇执行某个单篇动作。 */
+function runMany(
+  args: Record<string, unknown>,
+  action: "update" | "append",
+): string {
+  const docs = Array.isArray(args.docs) ? args.docs : [];
+  if (docs.length === 0) return "参数 docs 为空（应为 [{ title, content }, ...]），未做改动。";
+
+  const report: string[] = [];
+  for (const item of docs) {
+    const row = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+    const ref = String(row.title ?? row.name ?? row.target ?? row.id ?? "").trim();
+    const content = String(row.content ?? row.body ?? row.text ?? "").trim();
+    if (!content) {
+      report.push(ref ? `跳过「${ref}」：content 为空` : "跳过一条：缺少 title 与 content");
+      continue;
+    }
+    const file = resolveDoc(ref);
+    if (!file) {
+      report.push(`未找到文档「${ref}」`);
+      continue;
+    }
+    if (action === "update") {
+      const before = chars(file.content);
+      file.content = content;
+      syncActive(file);
+      report.push(`已替换「${file.title}」（${before} 字 → ${chars(content)} 字）`);
+    } else {
+      const separator = file.content.trim() ? (file.content.endsWith("\n") ? "" : "\n\n") : "";
+      file.content = `${file.content}${separator}${content}`;
+      syncActive(file);
+      report.push(`已在「${file.title}」末尾追加 ${chars(content)} 字，现共 ${chars(file.content)} 字`);
+    }
+  }
+  return report.length > 0 ? report.join("\n") : "没有文档被改动。";
+}
+
 /** 执行一次文档工具调用。永不抛错，问题以文本返回。 */
 export function runDocTool(name: string, args: Record<string, unknown>): string {
   try {
     if (name === "list_documents") return runList();
     if (name === "read_document") return runRead(args);
+    if (name === "read_documents") return runReadMany(args);
     if (name === "create_document") return runCreate(args);
     if (name === "update_document") return runUpdate(args);
+    if (name === "update_documents") return runMany(args, "update");
     if (name === "append_document") return runAppend(args);
+    if (name === "append_documents") return runMany(args, "append");
     return `未知工具: ${name}`;
   } catch (error) {
     return `工具执行失败: ${error instanceof Error ? error.message : String(error)}`;
@@ -367,11 +551,29 @@ export function describeDocToolCall(name: string, args: Record<string, unknown>)
     const offset = args.offset ? ` 第 ${args.offset} 行起` : "";
     return `阅读文档「${who}」${offset}`;
   }
+  if (name === "read_documents") {
+    const titles = refsFrom(args, "titles");
+    return `阅读 ${titles.length > 0 ? `${titles.length} 篇文档` : "当前文档"}`;
+  }
   if (name === "create_document") {
     const title = String(args.title ?? args.name ?? "").trim();
     return `新建文档「${title || "未命名文档"}」`;
   }
   if (name === "update_document") return `改写文档「${who}」`;
+  if (name === "update_documents") return "批量改写多篇文档";
   if (name === "append_document") return `续写文档「${who}」`;
+  if (name === "append_documents") return "批量续写多篇文档";
   return `调用工具 ${name}`;
+}
+
+/* ---------------- 供子代理等外部模块复用 ---------------- */
+
+/** 按标题/别名解析文档条目（模糊匹配），子代理用它定位目标文档。 */
+export function resolveDocByRef(ref?: string): DocFileItem | undefined {
+  return resolveDoc(ref);
+}
+
+/** 当前可用文档的清单文本，子代理与批量工具共用。 */
+export function listAvailableDocs(): string {
+  return availableDocs();
 }

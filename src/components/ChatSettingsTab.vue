@@ -215,6 +215,10 @@ function removeKnowledgeFile(id: string) {
   border: 1px solid var(--outline-variant);
   border-radius: 8px;
   overflow: hidden;
+  /* settings-body 是 flex 纵向布局；overflow:hidden 会把该项的自动最小高度
+     抹成 0，导致知识列表被 flex 压缩裁切、滚动条与底部文档不可见。
+     禁止收缩，让超出的部分由 settings-body 整体滚动承接。 */
+  flex-shrink: 0;
 }
 
 .knowledge-header {

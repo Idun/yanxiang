@@ -120,24 +120,42 @@ export function mapScrollTop(top: number, from: ScrollSpan, to: ScrollSpan): num
  *
  * 调用时机是 input 之后，此时浏览器已经把光标滚进可视区，所以只需处理
  * 「光标被压到舒适带下沿之下」这一种情况。
+ *
+ * @param caretTop 可选：光标行顶（相对滚动容器内容顶部的坐标）。默认从
+ *   textarea 的 selectionStart 用镜像测量推得；WYSIWYG / 画布等无
+ *   selectionStart 的容器由调用方从 DOM 选区量出后传入。
+ * @param lineHeightPx 可选：显式行高。预览纸面 / WYSIWYG 正文元素自设行高，
+ *   滚动容器取到的是继承值，对不上实际排版时由调用方传入。
  */
-export function typewriterTargetTop(el: HTMLTextAreaElement): number | null {
+export function typewriterTargetTop(
+  el: HTMLElement,
+  caretTop?: number | null,
+  lineHeightPx?: number,
+): number | null {
   const h = el.clientHeight;
   if (h <= 0) return null;
   const max = el.scrollHeight - h;
   /* 内容不足一屏：既没有滚动余量，也没有「贴底书写」的问题。 */
   if (max <= 0) return null;
 
-  const lh = lineHeightOf(el);
-  const caret = typeof el.selectionStart === "number" ? el.selectionStart : 0;
-  const [lineTop] = measureTextareaTops(el, [caret]);
+  const lh = lineHeightPx && lineHeightPx > 0 ? lineHeightPx : lineHeightOf(el);
+
+  let lineTop: number;
+  if (typeof caretTop === "number") {
+    lineTop = caretTop;
+  } else if (el instanceof HTMLTextAreaElement) {
+    const caret = typeof el.selectionStart === "number" ? el.selectionStart : 0;
+    lineTop = measureTextareaTops(el, [caret])[0];
+  } else {
+    return null;
+  }
   if (!Number.isFinite(lineTop)) return null;
 
   const anchor = h * ANCHOR_RATIO;
   /* 下沿不能低于「最后一行完整可见」的位置，否则矮编辑框里永远触发不了。 */
   const bandBottom = Math.min(Math.max(lh, h - lh), anchor + lh * BAND_LINES);
-  const caretTop = lineTop - el.scrollTop;
-  if (caretTop + lh <= bandBottom) return null;
+  const caretTopInView = lineTop - el.scrollTop;
+  if (caretTopInView + lh <= bandBottom) return null;
 
   const next = Math.round(Math.min(max, Math.max(0, lineTop - anchor)));
   return Math.abs(next - el.scrollTop) < 1 ? null : next;

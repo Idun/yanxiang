@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { contentScrollMax, mapScrollTop, scrollSpanOf } from "./typewriterScroll";
+import {
+  contentScrollMax,
+  mapScrollTop,
+  scrollSpanOf,
+  typewriterTargetTop,
+} from "./typewriterScroll";
 
 /**
  * 打字机滚动里与 DOM 无关的那部分：正文余量换算与两侧分段映射。
@@ -12,8 +17,8 @@ import { contentScrollMax, mapScrollTop, scrollSpanOf } from "./typewriterScroll
  * 行顶测量与舒适带判定依赖真实布局，留给手动验证。
  */
 
-const fake = (scrollHeight: number, clientHeight: number) =>
-  ({ scrollHeight, clientHeight }) as HTMLElement;
+const fake = (scrollHeight: number, clientHeight: number, scrollTop = 0) =>
+  ({ scrollHeight, clientHeight, scrollTop }) as HTMLElement;
 
 describe("contentScrollMax", () => {
   it("扣掉跑道后即为正文余量", () => {
@@ -96,3 +101,32 @@ describe("mapScrollTop", () => {
     expect(mapScrollTop(600, from, { contentMax: 0, runway: 0 })).toBe(0);
   });
 });
+
+/**
+ * typewriterTargetTop：给定光标行顶（WYSIWYG / 画布等无 selectionStart 的容器
+ * 由调用方量出后传入），按与 textarea 相同的舒适带规则算出应滚到的位置。
+ */
+describe("typewriterTargetTop · 显式 caretTop", () => {
+  /* 600 高的窗格、2000 总高（含末尾跑道）、28px 行高。 */
+  it("光标被压到舒适带下沿之下时，把该行拉回中部锚点", () => {
+    /* 光标行在正文末尾（内容坐标 1372），当前只保证它贴着底边（滚到 800）。 */
+    const el = fake(2000, 600, 800);
+    const next = typewriterTargetTop(el, 1372, 28);
+    /* 锚点 = 600 * 0.45 = 270；应滚到 1372 - 270 = 1102。 */
+    expect(next).toBe(1102);
+  });
+
+  it("光标行仍在舒适带内（翻回前文）时不做任何滚动", () => {
+    expect(typewriterTargetTop(fake(2000, 600, 0), 200, 28)).toBeNull();
+  });
+
+  it("内容不足一屏时返回 null（没有贴底书写的问题）", () => {
+    expect(typewriterTargetTop(fake(400, 600, 0), 100, 28)).toBeNull();
+  });
+
+  it("目标与当前滚动位置几乎相同（抖动 <1px）时返回 null", () => {
+    const el = fake(2000, 600, 1102);
+    expect(typewriterTargetTop(el, 1372, 28)).toBeNull();
+  });
+});
+

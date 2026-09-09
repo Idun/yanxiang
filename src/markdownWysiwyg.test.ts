@@ -55,6 +55,75 @@ describe("markdownToLiveHtml ↔ liveHtmlToMarkdown 往返", () => {
     root.innerHTML = markdownToLiveHtml(md);
     expect(liveHtmlToMarkdown(root)).toBe(md);
   });
+
+  it("表格渲染成 <table> 并可无损往返", () => {
+    const md = [
+      "| 列1 | 列2 | 列3 |",
+      "| --- | :---: | ---: |",
+      "| a | b | c |",
+      "| x | y | z |",
+    ].join("\n");
+    const root = document.createElement("div");
+    root.innerHTML = markdownToLiveHtml(md);
+    /* 渲染出真正的表格结构 */
+    expect(root.querySelector(".md-table table")).toBeTruthy();
+    expect(root.querySelectorAll(".md-table thead th.md-tbl-cell").length).toBe(3);
+    expect(root.querySelectorAll(".md-table tbody tr.md-tbl-row").length).toBe(2);
+    expect(root.querySelectorAll(".md-table .md-content").length).toBe(3 + 3 + 3);
+    /* 列对齐反映到单元格内容样式 */
+    const headCells = root.querySelectorAll(".md-table thead th .md-content");
+    expect(headCells[0].getAttribute("style")).toBeNull();
+    expect(headCells[1].getAttribute("style")).toContain("center");
+    expect(headCells[2].getAttribute("style")).toContain("right");
+    /* 往返无损 */
+    expect(liveHtmlToMarkdown(root)).toBe(md);
+  });
+
+  it("表格在文档中间：与前后段落正确往返", () => {
+    const md = [
+      "开头段落。",
+      "",
+      "| 名称 | 数值 |",
+      "| --- | --- |",
+      "| 甲 | 1 |",
+      "",
+      "结尾段落。",
+    ].join("\n");
+    const root = document.createElement("div");
+    root.innerHTML = markdownToLiveHtml(md);
+    const tables = root.querySelectorAll(".md-block.md-table");
+    expect(tables.length).toBe(1);
+    expect(liveHtmlToMarkdown(root)).toBe(md);
+  });
+
+  it("表头只有一行、没有数据行也能往返", () => {
+    const md = "| 标题 |\n| --- |\n| 内容 |";
+    const root = document.createElement("div");
+    root.innerHTML = markdownToLiveHtml(md);
+    expect(liveHtmlToMarkdown(root)).toBe(md);
+  });
+
+  it("单列表格也能渲染与往返", () => {
+    const md = ["| 日期 |", "| --- |", "| 周一 |", "| 周二 |"].join("\n");
+    const root = document.createElement("div");
+    root.innerHTML = markdownToLiveHtml(md);
+    expect(root.querySelector(".md-table")).toBeTruthy();
+    expect(liveHtmlToMarkdown(root)).toBe(md);
+  });
+
+  it("单元格里的 | 被转义还原，不破坏列结构", () => {
+    const md = ["| 表达式 | 结果 |", "| --- | --- |", "| a \\| b | 3 |"].join("\n");
+    const root = document.createElement("div");
+    root.innerHTML = markdownToLiveHtml(md);
+    expect(liveHtmlToMarkdown(root)).toBe(md);
+  });
+
+  it("非表格的带竖线行不会被误判成表格", () => {
+    const md = "这段 | 不是表格。\n下一行只是普通文字。";
+    const root = document.createElement("div");
+    root.innerHTML = markdownToLiveHtml(md);
+    expect(root.querySelector(".md-table")).toBeNull();
+  });
 });
 
 /**
