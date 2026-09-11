@@ -15,6 +15,8 @@ import {
   clampEditorLineHeight,
   clampEditorMarginX,
   clampEditorMarginY,
+  clampLayoutMaxMergedLines,
+  clampLayoutShortLineMax,
   type ContentColorScheme,
   MAX_CONTENT_COLOR_SCHEMES,
 } from "./settings";
@@ -85,8 +87,10 @@ let booted = false;
    的措辞让模型大面积照抄（十句里九句原样返回）。现在改为「默认动手改 +
    八项检查表 + 每组至少一半必须实质改写」，并把「标点一律不动」放宽为
    「标点写法照原文、句末对齐原文、句内断句可为改写需要而调整」。
-   必须重同步，否则老用户仍沿用那份让模型不改的提示词。 */
-const PROMPT_SYNC_VERSION = 5;
+   必须重同步，否则老用户仍沿用那份让模型不改的提示词。
+   v6: 审核员提示词补充说明：明确指示审核员在评估时需读取并参考知识库中用户新增的知识文件。
+   必须重同步，确保审核员智能体准确读取新加载的文档知识。 */
+const PROMPT_SYNC_VERSION = 6;
 
 export async function initPersistence() {
   if (booted) return;
@@ -128,6 +132,17 @@ export async function initPersistence() {
     aiSettings.readerPrompt = READER_AGENT_PROMPT;
     aiSettings.refinePrompt = REFINE_AGENT_PROMPT;
     aiSettings.chatPrompt = CHAT_AGENT_PROMPT;
+    /* 版本不匹配才落盘：把最新默认提示词写进持久化并同步版本号。
+       只更新内存、等深 watch 捎带走是不可靠的——用户升级后如果不改任何
+       设置，深 watch 不会触发，第二次启动就会按「已同步」读回旧的提示词。 */
+    void saveSettings([
+      { key: "writerPrompt", value: WRITER_AGENT_PROMPT },
+      { key: "auditorPrompt", value: AUDITOR_AGENT_PROMPT },
+      { key: "readerPrompt", value: READER_AGENT_PROMPT },
+      { key: "refinePrompt", value: REFINE_AGENT_PROMPT },
+      { key: "chatPrompt", value: CHAT_AGENT_PROMPT },
+      { key: "promptSyncVersion", value: String(PROMPT_SYNC_VERSION) },
+    ]);
   }
   if (settings.vectorEnabled !== undefined) {
     aiSettings.vectorEnabled = settings.vectorEnabled === "true";
@@ -288,6 +303,15 @@ export async function initPersistence() {
     if (gl === "none" || gl === "solid" || gl === "dashed" || gl === "dotted") {
       aiSettings.editorGridLine = gl;
     }
+  }
+  /* 随机排版参数：面板滑块调的「短句上限 / 每段最多并入行数」。 */
+  if (settings.layoutShortLineMax !== undefined) {
+    aiSettings.layoutShortLineMax = clampLayoutShortLineMax(Number(settings.layoutShortLineMax));
+  }
+  if (settings.layoutMaxMergedLines !== undefined) {
+    aiSettings.layoutMaxMergedLines = clampLayoutMaxMergedLines(
+      Number(settings.layoutMaxMergedLines),
+    );
   }
   /* 自动保存：开关 + 间隔（分钟，1–5）。 */
   if (settings.autoSaveEnabled !== undefined) {
@@ -689,6 +713,8 @@ export async function initPersistence() {
         { key: "editorMarginX", value: String(s.editorMarginX) },
         { key: "editorMarginY", value: String(s.editorMarginY) },
         { key: "editorGridLine", value: s.editorGridLine },
+        { key: "layoutShortLineMax", value: String(s.layoutShortLineMax) },
+        { key: "layoutMaxMergedLines", value: String(s.layoutMaxMergedLines) },
         { key: "autoSaveEnabled", value: String(s.autoSaveEnabled) },
         { key: "autoSaveMinutes", value: String(s.autoSaveMinutes) },
         { key: "theme", value: JSON.stringify(s.theme) },

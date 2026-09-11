@@ -1,4 +1,21 @@
-﻿:root {
+﻿/* 中文标点（引号 “ ” ‘ ’）全角渲染保障虚拟字体族：
+   拦截 U+2018, U+2019, U+201C, U+201D，优先由系统优质中文字体渲染为标准全角宽度，
+   彻底根治西文字体（Inter / Satoshi / Segoe UI 等）抢占导致引号显示为狭窄英文半角的顽疾。 */
+@font-face {
+  font-family: "ChineseQuotes";
+  src:
+    local("PingFang SC"),
+    local("Microsoft YaHei"),
+    local("Source Han Sans SC"),
+    local("Noto Sans SC"),
+    local("SimHei"),
+    local("SimSun"),
+    local("STHeiti"),
+    local("WenQuanYi Micro Hei");
+  unicode-range: U+2018, U+2019, U+201C, U+201D;
+}
+
+:root {
   color-scheme: light;
 
   /* Material + Glass Refined Palette */
@@ -33,7 +50,7 @@
   --shadow: 0 10px 30px -10px rgb(15 23 42 / 0.08), 0 4px 6px -2px rgb(15 23 42 / 0.04);
   --shadow-lg: 0 20px 40px -15px rgb(15 23 42 / 0.14), 0 8px 16px -4px rgb(15 23 42 / 0.06);
   --drawer-shadow: -8px 0 24px -4px rgb(15 23 42 / 0.08);
-  --app-font: "Satoshi", "Geist", "Outfit", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --app-font: "ChineseQuotes", "PingFang SC", "Microsoft YaHei", "Satoshi", "Geist", "Outfit", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --code-font: "JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
 
   /* ---------- 阅读面（文档编辑区 / 预览区）专用配色 ----------
@@ -626,6 +643,7 @@ select {
 
 .reading-view.content-colored .zj-quote {
   color: var(--zj-quote);
+  font-family: "ChineseQuotes", "PingFang SC", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans SC", "SimSun", sans-serif;
 }
 
 .reading-view.content-colored .zj-bracket {

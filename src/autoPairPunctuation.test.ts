@@ -60,6 +60,43 @@ describe("computeInsertPairCorrection · 同形直引号", () => {
   });
 });
 
+describe("computeInsertPairCorrection · ASCII 引号在中文语境下转全角", () => {
+  it("汉字后打 \" → 自动输出 “” 并补全，光标停在中间", () => {
+    const r = computeInsertPairCorrection("他说", 2, 2, '他说"', 3, '"');
+    expect(r).toEqual({ next: "他说“”", selStart: 3, selEnd: 3 });
+  });
+
+  it("中文标点后打 ' → 输出 ‘’ 并补全", () => {
+    const r = computeInsertPairCorrection("他说，", 3, 3, "他说，'", 4, "'");
+    expect(r).toEqual({ next: "他说，‘’", selStart: 4, selEnd: 4 });
+  });
+
+  it("选中中文后打 \" → 用全角引号整段包起来，包完保持选中", () => {
+    const r = computeInsertPairCorrection("选中文字", 0, 4, '"', 1, '"');
+    expect(r).toEqual({ next: "“选中文字”", selStart: 1, selEnd: 5 });
+  });
+
+  it("光标压在已补全的全角右引号前打 \" → 撤掉刚打的，直接跨过去", () => {
+    const r = computeInsertPairCorrection("“他说”", 3, 3, '“他说"”', 4, '"');
+    expect(r).toEqual({ next: "“他说”", selStart: 4, selEnd: 4 });
+  });
+
+  it("前面已有未闭合左引号时打 \" → 换成全角右引号收尾，不重复补另一半", () => {
+    const r = computeInsertPairCorrection("他说“", 3, 3, '他说“"', 4, '"');
+    expect(r).toEqual({ next: "他说“”", selStart: 4, selEnd: 4 });
+  });
+
+  it("行首（中文文档）打 \" → 开引号并补全", () => {
+    const r = computeInsertPairCorrection("", 0, 0, '"', 1, '"');
+    expect(r).toEqual({ next: "“”", selStart: 1, selEnd: 1 });
+  });
+
+  it("紧跟在半角字母后打 ' → 保留撇号语义，不转全角", () => {
+    const r = computeInsertPairCorrection("他说 it", 5, 5, "他说 it'", 6, "'");
+    expect(r).toBeNull();
+  });
+});
+
 describe("computeInsertPairCorrection · 跨越 / 选中包裹", () => {
   it("光标压在同一个右引号前 → 撤掉刚打的字符直接跨过去", () => {
     const r = computeInsertPairCorrection("他道：“”", 4, 4, "他道：“””", 5, "”");

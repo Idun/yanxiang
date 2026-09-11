@@ -739,6 +739,9 @@ let isInternalEdit = false;
 let currentFocusedBlock: HTMLElement | null = null;
 let currentFocusedInline: HTMLElement | null = null;
 
+/** 当前选中的字符数量 */
+const selectedCharCount = ref(0);
+
 /** 光标所在块当前挂着的行级标记（供上层工具栏菜单打勾，见 focusedLineStyle 更新）。 */
 const focusedLineStyle = ref<string | null>(null);
 
@@ -819,8 +822,23 @@ function updateFocusState() {
   const editor = editorRef.value;
   if (!editor) {
     clearFocusState();
+    selectedCharCount.value = 0;
     return;
   }
+
+  /* 计算用户选中文本字符数量 */
+  if (sel && sel.rangeCount > 0 && editor.contains(sel.anchorNode) && !sel.isCollapsed) {
+    const range = sel.getRangeAt(0);
+    if (editor.contains(range.commonAncestorContainer)) {
+      const off = docSelectionOffsets();
+      selectedCharCount.value = Math.max(0, off.end - off.start);
+    } else {
+      selectedCharCount.value = sel.toString().length;
+    }
+  } else {
+    selectedCharCount.value = 0;
+  }
+
   /* 无论选区落在哪里（含塌缩 / 移出编辑区）都通知上层：上层据此收起或
      浮现「选中文字工具栏」。只要调用方在意的选区状态真的变了才值得发 ——
      但 selectionchange 事件本身只在选区变化时派发，这里照单全收即可。 */
@@ -867,6 +885,7 @@ function updateFocusState() {
 }
 
 function clearFocusState() {
+  selectedCharCount.value = 0;
   if (currentFocusedBlock) {
     currentFocusedBlock.classList.remove("is-focused");
     currentFocusedBlock = null;
@@ -2567,7 +2586,14 @@ defineExpose({
           <Palette :size="11" :stroke-width="1.9" />
           内容上色
         </button>
-        <span class="char-count">{{ (props.modelValue || "").length }} 字符</span>
+        <span class="char-count">
+          <template v-if="selectedCharCount > 0">
+            已选 {{ selectedCharCount }} / 共 {{ (props.modelValue || "").length }} 字符
+          </template>
+          <template v-else>
+            {{ (props.modelValue || "").length }} 字符
+          </template>
+        </span>
       </span>
     </div>
 

@@ -10,6 +10,14 @@ import {
   BUNDLED_READER_KNOWLEDGE,
   BUNDLED_WRITER_KNOWLEDGE,
 } from "./prompts/knowledgeDefaults";
+import {
+  MAX_MERGED_LINES,
+  MERGE_MAX_LIMIT,
+  MERGE_MIN_LIMIT,
+  SHORT_LINE_MAX,
+  SHORT_LINE_MAX_LIMIT,
+  SHORT_LINE_MIN_LIMIT,
+} from "./randomLayout";
 
 const providerUrls: Record<string, string> = {
   OpenAI: "https://api.openai.com/v1",
@@ -194,6 +202,20 @@ export function clampEditorMarginY(my: number): number {
   return Math.min(200, Math.max(0, Math.round(my)));
 }
 
+/* ---------------- 随机排版参数（短句上限 / 每段最多并入行数） ----------------
+   默认值与取值范围都取自 randomLayout，面板滑块、持久化夹紧、引擎入口
+   共用同一份，不会出现「面板显示 40 字、引擎按 100 字跑」的错位。 */
+
+export function clampLayoutShortLineMax(n: number): number {
+  if (!Number.isFinite(n)) return SHORT_LINE_MAX;
+  return Math.min(SHORT_LINE_MAX_LIMIT, Math.max(SHORT_LINE_MIN_LIMIT, Math.round(n)));
+}
+
+export function clampLayoutMaxMergedLines(n: number): number {
+  if (!Number.isFinite(n)) return MAX_MERGED_LINES;
+  return Math.min(MERGE_MAX_LIMIT, Math.max(MERGE_MIN_LIMIT, Math.round(n)));
+}
+
 /* ---------------- 自动保存（静默执行「保存更改」）----------------
    间隔以分钟计，区间 1–5 分钟。默认取区间中位数 3 分钟：足够勤，又不会
    把已关联的本地文件写得过于频繁。 */
@@ -351,6 +373,11 @@ export const aiSettings = reactive({
   remoteEmbeddingUrl: "https://api.openai.com/v1/embeddings",
   remoteEmbeddingKey: "",
   remoteEmbeddingModel: "text-embedding-3-small",
+  /* 随机排版参数：多长算「短句」（区间见 clampLayoutShortLineMax）、
+     一段最多并几行短句（见 clampLayoutMaxMergedLines）。跟随设置持久化，
+     面板里直接改这两个值，深 watch 会负责落盘。 */
+  layoutShortLineMax: SHORT_LINE_MAX,
+  layoutMaxMergedLines: MAX_MERGED_LINES,
 });
 
 export function applyProvider(provider: string) {
@@ -496,8 +523,8 @@ export function resetTheme() {
 }
 
 export function applyFont(font: string) {
-  /* Keep a fallback chain so missing glyphs (esp. CJK) still render. */
-  const stack = `"${font}", "Inter", "Segoe UI", "PingFang SC", system-ui, sans-serif`;
+  /* Keep ChineseQuotes & CJK fallbacks at the top of the chain for full-width punctuation. */
+  const stack = `"${font}", "ChineseQuotes", "PingFang SC", "Microsoft YaHei", "Source Han Sans SC", "Inter", "Segoe UI", system-ui, sans-serif`;
   document.documentElement.style.setProperty("--app-font", stack);
   aiSettings.appFont = font;
 }

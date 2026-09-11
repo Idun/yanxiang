@@ -4,6 +4,8 @@ import {
   Bold,
   ChevronDown,
   Copy,
+  Dices,
+  Eraser,
   Eye,
   Heading,
   Heading1,
@@ -43,6 +45,19 @@ import {
   CaseSensitive,
 } from "lucide-vue-next";
 import { renderForReading } from "../markdown";
+import {
+  randomizeLayout,
+  MERGE_MAX_LIMIT,
+  MERGE_MIN_LIMIT,
+  SHORT_LINE_MAX_LIMIT,
+  SHORT_LINE_MIN_LIMIT,
+} from "../randomLayout";
+import {
+  cleanParticles,
+  PARTICLES,
+  type CleanupMode,
+  type Particle,
+} from "../particleCleanup";
 import {
   applyContentColoring,
   contentColorCssVars,
@@ -872,7 +887,7 @@ function redo() {
 
 function onEditorKeydown(event: KeyboardEvent) {
   /* 工具栏下拉菜单开着时 Escape 先收菜单，不要顺带退出禅定模式。 */
-  if (event.key === "Escape" && (headingMenuOpen.value || listMenuOpen.value)) {
+  if (event.key === "Escape" && (headingMenuOpen.value || listMenuOpen.value || formatMenuOpen.value)) {
     event.preventDefault();
     event.stopPropagation();
     closeToolMenus();
@@ -967,6 +982,16 @@ async function copyAll() {
   }
 }
 
+/* 「一键去的地得」可选的三个字，顺序即菜单里的排列顺序。 */
+const DE_TOKENS: readonly Particle[] = PARTICLES.filter((p) => p !== "了");
+
+/*
+ * 清理模式。smart 走 particleCleanup 的规则引擎逐字判「删了句子还成立吗」，
+ * all 是最早那版无差别删除——留着它是因为偶尔真有人只想图快。
+ * 默认 smart：破坏正文的代价远高于少删几个字。
+ */
+const cleanupMode = ref<CleanupMode>("smart");
+
 /* 一键排版：保留原文换行机制，只清除“无意义”的空行，让内容紧凑。 */
 function reformatWhitespace() {
   if (!markdown.value) return;
@@ -979,12 +1004,123 @@ function reformatWhitespace() {
   if (cleaned !== markdown.value) {
     markdown.value = cleaned;
     /* 焦点交回编辑区，紧接着按 Ctrl+Z 就能撤掉这次排版。 */
-    nextTick(() => editorRef.value?.focus());
+    nextTick(focusActiveEditor);
     showToast("已重新排版", "已清除多余空行，内容更紧凑", "habit");
   } else {
     showToast("无需调整", "当前内容没有多余空行", "habit");
   }
 }
+
+/** 菜单里的「一键排版」：先收菜单再排版，效果与 Ctrl+Shift+F 完全一致。 */
+function pickReformatWhitespace() {
+  closeToolMenus();
+  reformatWhitespace();
+}
+
+/*
+ * 随机排版：AI 写出来的正文常常一句一行，版面上像列清单。
+ * 这里把相邻的短行随机并成段落，句子本身一个字不改，
+ * 只吃掉那些「人类不会这么换」的换行。长段落、对白、空行、标题列表代码块一概不碰，
+ * 明细规则见 src/randomLayout.ts。想反悔按 Ctrl+Z。
+ *
+ * 两个旋钮做成菜单里的滑块而非写死的常量：多长算「短句」、一段最多并几行，
+ * 不同稿子的手感差很远，现调现试比猜一个默认值靠谱。
+ * 值直接落在 aiSettings.layoutShortLineMax / aiSettings.layoutMaxMergedLines 上——
+ * 现有 settings 深 watch 会把它们写进持久化，重开软件仍是上次的手感。
+ */
+function randomizeDocLayout() {
+  closeToolMenus();
+  if (!markdown.value) {
+    showToast("文档为空", "没有可排版的正文内容", "edit");
+    return;
+  }
+  const result = randomizeLayout(markdown.value, {
+    shortLineMax: aiSettings.layoutShortLineMax,
+    maxMergedLines: aiSettings.layoutMaxMergedLines,
+  });
+  if (result.merged === 0) {
+    showToast(
+      "无需排版",
+      `没有找到 ${aiSettings.layoutShortLineMax} 字以内的连续短句，可把「短句上限」调大再试`,
+      "habit",
+    );
+    return;
+  }
+  markdown.value = result.text;
+  nextTick(focusActiveEditor);
+  showToast(
+    "已随机排版",
+    `合并了 ${result.merged} 处短句换行，成 ${result.paragraphs} 段，可按 Ctrl+Z 撤回`,
+    "habit",
+  );
+}
+
+/**
+ * 虚词清理的公共落地：拿规则引擎跑一遍，再把「删了几个、留了几个」如实报出来。
+ * 一次点击对应一条撤销历史，反悔按 Ctrl+Z。
+ */
+function runParticleCleanup(targets: readonly Particle[], title: string) {
+  closeToolMenus();
+  if (targets.length === 0) {
+    showToast("未选择字", "请先勾选要清理的「的 / 地 / 得」", "edit");
+    return;
+  }
+  if (!markdown.value) {
+    showToast("文档为空", "没有可清理的正文内容", "edit");
+    return;
+  }
+  const label = targets.join("、");
+  const result = cleanParticles(markdown.value, targets, cleanupMode.value);
+  if (result.removed === 0) {
+    /* 一个没删有两种可能：正文本来就没有，或者都是删不得的必要用法。 */
+    const detail =
+      result.kept === 0
+        ? `正文中没有「${label}」`
+        : `${result.kept} 个「${label}」都是必要用法（词语内部、句末表变化、补语标记等），已全部保留`;
+    showToast("无需清理", detail, "habit");
+    return;
+  }
+  markdown.value = result.text;
+  nextTick(focusActiveEditor);
+  const detail =
+    cleanupMode.value === "smart"
+      ? `删除 ${result.removed} 个冗余的「${label}」，保留 ${result.kept} 个必要用法，可按 Ctrl+Z 撤回`
+      : `共删除 ${result.removed} 个「${label}」，可按 Ctrl+Z 撤回`;
+  showToast(title, detail, "habit");
+}
+
+/* 一键去了字。 */
+function cleanLeToken() {
+  runParticleCleanup(["了"], "已去“了”字");
+}
+
+/* 一键去的地得：只清理用户勾选的那几个字，默认三个全勾但可自由取消。 */
+function cleanDeTokens() {
+  runParticleCleanup([...selectedDeTokens.value], "已去的地得");
+}
+
+/** 勾选 / 取消勾选某个待清理的字，菜单保持展开以便继续挑选。 */
+function toggleDeToken(token: Particle) {
+  const list = selectedDeTokens.value;
+  selectedDeTokens.value = list.includes(token)
+    ? list.filter((t) => t !== token)
+    : [...list, token].sort((a, b) => DE_TOKENS.indexOf(a) - DE_TOKENS.indexOf(b));
+}
+
+/* 菜单里两句会随模式 / 勾选变化的说明。面板宽高固定，这两句都按
+   两行的高度预留了槽位，所以措辞控制在 22 字以内，切换时不会撑动布局。 */
+
+const cleanupModeTip = computed(() =>
+  cleanupMode.value === "smart"
+    ? "只删冗余，「了解」「他走了。」这类必要用法保留"
+    : "匹配到就删，可能削断词语与句子，请核对后保存",
+);
+
+const deTokenTip = computed(() => {
+  if (cleanupMode.value === "all") return "当前为全部删除，选中的字会被逐个删光";
+  if (selectedDeTokens.value.includes("得")) return "「得」是补语与动词标记，智能模式下全部保留";
+  return "只删「的的不休」与可省定语，结构必需的保留";
+});
 
 const showClearConfirm = ref(false);
 
@@ -1032,7 +1168,9 @@ const localOnlyFonts = computed(() => {
   return fontState.localFonts.filter((f) => !presets.has(f));
 });
 
-const editorFontStack = computed(() => `"${editorFont.value}", var(--app-font)`);
+const editorFontStack = computed(
+  () => `"ChineseQuotes", "${editorFont.value}", var(--app-font)`,
+);
 
 /* 预览纸面样式：字号 / 字体之外，把「内容上色」配色方案以 CSS 变量挂上来，
    zj-* 着色类按需取色，颜色值只维护在 contentColoring.ts 一份。
@@ -1785,11 +1923,14 @@ function insertLinkVia() {
 
 const headingMenuOpen = ref(false);
 const listMenuOpen = ref(false);
+const formatMenuOpen = ref(false);
 const typographyPanelOpen = ref(false);
+const selectedDeTokens = ref<Particle[]>([...DE_TOKENS]);
 const toolMenuPos = ref({ top: 0, left: 0 });
 const typographyMenuPos = ref({ top: 0, left: 0 });
 const headingBtnRef = ref<HTMLElement | null>(null);
 const listBtnRef = ref<HTMLElement | null>(null);
+const formatBtnRef = ref<HTMLElement | null>(null);
 const typographyBtnRef = ref<HTMLElement | null>(null);
 const toolMenuRef = ref<HTMLElement | null>(null);
 const typographyPanelRef = ref<HTMLElement | null>(null);
@@ -1818,6 +1959,7 @@ const currentLineStyle = computed<LineStyle | null>(() => {
 function closeToolMenus() {
   headingMenuOpen.value = false;
   listMenuOpen.value = false;
+  formatMenuOpen.value = false;
   typographyPanelOpen.value = false;
 }
 
@@ -1862,16 +2004,27 @@ function toggleTypographyPanel() {
   nextTick(clampTypographyPanel);
 }
 
-function toggleToolMenu(which: "heading" | "list") {
-  const wasOpen = which === "heading" ? headingMenuOpen.value : listMenuOpen.value;
+function toggleToolMenu(which: "heading" | "list" | "format") {
+  const wasOpen =
+    which === "heading"
+      ? headingMenuOpen.value
+      : which === "list"
+        ? listMenuOpen.value
+        : formatMenuOpen.value;
   closeToolMenus();
   if (wasOpen) return;
-  const btn = which === "heading" ? headingBtnRef.value : listBtnRef.value;
+  const btn =
+    which === "heading"
+      ? headingBtnRef.value
+      : which === "list"
+        ? listBtnRef.value
+        : formatBtnRef.value;
   if (!btn) return;
   const rect = btn.getBoundingClientRect();
   toolMenuPos.value = { top: rect.bottom + 6, left: rect.left };
   if (which === "heading") headingMenuOpen.value = true;
-  else listMenuOpen.value = true;
+  else if (which === "list") listMenuOpen.value = true;
+  else formatMenuOpen.value = true;
   nextTick(clampToolMenu);
 }
 
@@ -2377,6 +2530,27 @@ const selectionBarPos = ref({ top: 12, left: 100 });
 const selectionBarCompact = ref(false);
 /* 选中时鼠标所在的视口坐标，用于让工具栏跟随光标出现在选中文字上方。 */
 const selectionMousePos = ref<{ x: number; y: number } | null>(null);
+
+/** 当前选中的字符数量（全模式通用：源码编辑 / WYSIWYG / 预览）。
+    用命令式 ref + 选区事件刷新：textarea 的 selectionStart/End 与 contenteditable
+    的选区都不是响应式数据，computed 无法感知选区变化，必须显式刷新。 */
+const selectedCharCount = ref(0);
+
+function refreshSelectedCharCount() {
+  if (showWysiwyg.value) {
+    const off = wysiwygRef.value?.getSelectionOffsets();
+    selectedCharCount.value = off ? Math.max(0, off.end - off.start) : 0;
+    return;
+  }
+  const el = editorRef.value;
+  if (el) {
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    selectedCharCount.value = end > start ? end - start : 0;
+    return;
+  }
+  selectedCharCount.value = 0;
+}
 /* 为 true 时按鼠标位置锚定（鼠标选中），否则（键盘选区/滚动后）按选中文字锚定。 */
 let anchorByMouse = false;
 /* 本次按下是否从编辑区发起（保证只在编辑区拖拽结束时才采集光标位置，
@@ -2677,6 +2851,7 @@ function positionSelectionBar() {
 }
 
 function checkTextareaSelection() {
+  refreshSelectedCharCount();
   const el = editorRef.value;
   const start = el ? el.selectionStart : null;
   const end = el ? el.selectionEnd : null;
@@ -2719,6 +2894,7 @@ function checkTextareaSelection() {
    回退为跟随选中文字顶部。 */
 
 function onWysiwygSelectionChange() {
+  refreshSelectedCharCount();
   /* 只有选区确实落在编辑区内时才刷新撤销快照的光标位置（与 textarea 侧
      仅在本编辑区持有焦点时同步一致），避免全局 selectionchange 误触覆盖。 */
   if (wysiwygRef.value?.selectionInsideEditor()) {
@@ -3203,6 +3379,7 @@ function handleGlobalMouseDown(e: MouseEvent) {
     (toolMenuRef.value?.contains(target) ?? false) ||
     (headingBtnRef.value?.contains(target) ?? false) ||
     (listBtnRef.value?.contains(target) ?? false) ||
+    (formatBtnRef.value?.contains(target) ?? false) ||
     inTypographyPanel;
   if (!inToolMenu) closeToolMenus();
   /* 点击浮层菜单本身不收起；点击编辑区只收起菜单。 */
@@ -3238,6 +3415,7 @@ function onEditorSelectionChange() {
   const el = editorRef.value;
   if (!el) return;
   if (document.activeElement !== el) return;
+  refreshSelectedCharCount();
   const start = el.selectionStart;
   const end = el.selectionEnd;
   if (start === null || end === null) return;
@@ -3840,8 +4018,16 @@ onBeforeUnmount(() => {
         <button class="format-btn" title="复制全部内容" @click="copyAll">
           <Copy :size="15" :stroke-width="1.8" />
         </button>
-        <button class="format-btn" title="一键排版：清除多余空行，让内容更紧凑 (Ctrl+Shift+F)" @click="reformatWhitespace">
+        <button
+          ref="formatBtnRef"
+          class="format-btn has-menu"
+          :class="{ active: formatMenuOpen }"
+          title="文本清理：一键排版 (Ctrl+Shift+F) / 一键去了字 / 一键去的地得"
+          @mousedown.prevent
+          @click="toggleToolMenu('format')"
+        >
           <WrapText :size="15" :stroke-width="1.8" />
+          <ChevronDown class="menu-caret" :size="9" :stroke-width="2.6" />
         </button>
         <button class="format-btn" title="清空文档" @click="clearDoc">
           <Trash2 :size="15" :stroke-width="1.8" />
@@ -3904,9 +4090,10 @@ onBeforeUnmount(() => {
     <Teleport to="body">
       <Transition name="fade">
         <div
-          v-if="headingMenuOpen || listMenuOpen"
+          v-if="headingMenuOpen || listMenuOpen || formatMenuOpen"
           ref="toolMenuRef"
           class="toolbar-menu"
+          :class="{ 'format-menu': formatMenuOpen }"
           :style="{ top: toolMenuPos.top + 'px', left: toolMenuPos.left + 'px' }"
           @mousedown.prevent.stop
         >
@@ -3922,6 +4109,137 @@ onBeforeUnmount(() => {
               <span>{{ lv.label }}</span>
               <span class="toolbar-menu-syntax">{{ '#'.repeat(Number(lv.style.slice(1))) }}</span>
             </button>
+          </template>
+          <template v-else-if="formatMenuOpen">
+            <button
+              class="toolbar-menu-item"
+              title="清除多余空行，让内容更紧凑"
+              @click="pickReformatWhitespace()"
+            >
+              <WrapText :size="14" :stroke-width="1.8" />
+              <span>一键排版</span>
+              <span class="toolbar-menu-syntax">Ctrl+Shift+F</span>
+            </button>
+            <button
+              class="toolbar-menu-item"
+              title="把「一句一行」的短句随机并成段落，长段落、对白与结构行保持不动"
+              @click="randomizeDocLayout()"
+            >
+              <Dices :size="14" :stroke-width="1.8" />
+              <span>随机排版</span>
+              <span class="toolbar-menu-syntax">随性换行</span>
+            </button>
+            <div class="toolbar-menu-section rl-section">
+              <div class="rl-row">
+                <span class="rl-label">短句上限</span>
+                <input
+                  v-model.number="aiSettings.layoutShortLineMax"
+                  class="rl-slider"
+                  type="range"
+                  :min="SHORT_LINE_MIN_LIMIT"
+                  :max="SHORT_LINE_MAX_LIMIT"
+                  step="1"
+                  :title="`超过 ${aiSettings.layoutShortLineMax} 字的行按独立段落对待，不参与合并（${SHORT_LINE_MIN_LIMIT} ~ ${SHORT_LINE_MAX_LIMIT} 字）`"
+                  @mousedown.stop
+                />
+                <span class="rl-value">{{ aiSettings.layoutShortLineMax }} 字</span>
+              </div>
+              <div class="rl-row">
+                <span class="rl-label">每段最多</span>
+                <input
+                  v-model.number="aiSettings.layoutMaxMergedLines"
+                  class="rl-slider"
+                  type="range"
+                  :min="MERGE_MIN_LIMIT"
+                  :max="MERGE_MAX_LIMIT"
+                  step="1"
+                  :title="`一段最多并入 ${aiSettings.layoutMaxMergedLines} 行短句（${MERGE_MIN_LIMIT} ~ ${MERGE_MAX_LIMIT} 行）`"
+                  @mousedown.stop
+                />
+                <span class="rl-value">{{ aiSettings.layoutMaxMergedLines }} 行</span>
+              </div>
+            </div>
+            <div class="toolbar-menu-divider" />
+            <div class="toolbar-menu-section">
+              <div class="toolbar-menu-section-head">
+                <span>清理模式</span>
+              </div>
+              <div class="mode-switch">
+                <button
+                  class="mode-seg"
+                  :class="{ on: cleanupMode === 'smart' }"
+                  title="逐字判断：词语内部、句末表变化、补语标记等必要用法一律保留"
+                  @click.stop="cleanupMode = 'smart'"
+                >
+                  智能保留
+                </button>
+                <button
+                  class="mode-seg"
+                  :class="{ on: cleanupMode === 'all' }"
+                  title="无差别删除（代码块与链接地址仍会跳过）"
+                  @click.stop="cleanupMode = 'all'"
+                >
+                  全部删除
+                </button>
+              </div>
+              <div class="toolbar-menu-section-tip tip-slot">{{ cleanupModeTip }}</div>
+            </div>
+            <div class="toolbar-menu-divider" />
+            <button
+              class="toolbar-menu-item"
+              :title="
+                cleanupMode === 'smart'
+                  ? '删除句中堆砌的完成体「了」，保留句末与词内的「了」'
+                  : '删除正文中所有「了」'
+              "
+              @click="cleanLeToken()"
+            >
+              <Eraser :size="14" :stroke-width="1.8" />
+              <span>一键去了字</span>
+              <span class="toolbar-menu-syntax">了</span>
+            </button>
+            <div class="toolbar-menu-divider" />
+            <div class="toolbar-menu-section">
+              <div class="toolbar-menu-section-head">
+                <Eraser :size="14" :stroke-width="1.8" />
+                <span>一键去的地得</span>
+              </div>
+              <div class="toolbar-menu-section-tip">勾选要清理的字，可只选其中一个</div>
+              <div class="de-pill-group">
+                <button
+                  v-for="tk in DE_TOKENS"
+                  :key="tk"
+                  class="de-pill"
+                  :class="{ on: selectedDeTokens.includes(tk) }"
+                  :title="selectedDeTokens.includes(tk) ? `取消清理「${tk}」` : `勾选清理「${tk}」`"
+                  @click.stop="toggleDeToken(tk)"
+                >
+                  {{ tk }}
+                </button>
+              </div>
+              <div
+                class="toolbar-menu-section-tip tip-slot"
+                :class="{ warn: cleanupMode === 'smart' && selectedDeTokens.includes('得') }"
+              >
+                {{ deTokenTip }}
+              </div>
+              <button
+                class="de-clean-btn"
+                :disabled="selectedDeTokens.length === 0"
+                :title="
+                  selectedDeTokens.length === 0
+                    ? '请先勾选要清理的字'
+                    : `清理正文中冗余的「${selectedDeTokens.join('、')}」`
+                "
+                @click="cleanDeTokens()"
+              >
+                {{
+                  selectedDeTokens.length === 0
+                    ? '请先勾选要清理的字'
+                    : `清理「${selectedDeTokens.join('、')}」`
+                }}
+              </button>
+            </div>
           </template>
           <template v-else>
             <button
@@ -4234,7 +4552,14 @@ onBeforeUnmount(() => {
                 <Sparkles :size="11" :stroke-width="1.8" />
                 {{ habitBadgeCount }}
               </span>
-              <span>{{ markdown.length }} 字符</span>
+              <span>
+                <template v-if="selectedCharCount > 0">
+                  已选 {{ selectedCharCount }} / 共 {{ markdown.length }} 字符
+                </template>
+                <template v-else>
+                  {{ markdown.length }} 字符
+                </template>
+              </span>
             </span>
           </div>
           <div
@@ -5085,6 +5410,172 @@ onBeforeUnmount(() => {
 
 .toolbar-menu-item.on .toolbar-menu-syntax {
   color: var(--primary);
+}
+
+/* ---- 一键排版下拉菜单：排版 / 去了字 / 去的地得 ----
+   宽度写死，不让内容去撑；两句会变的说明各自占一个两行高的固定槽位，
+   于是切换模式 / 勾选时面板的宽高都不动。 */
+.toolbar-menu.format-menu {
+  width: 232px;
+}
+
+.toolbar-menu-divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--outline-variant);
+  opacity: 0.7;
+}
+
+.toolbar-menu-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 8px 6px;
+}
+
+.toolbar-menu-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--on-surface);
+}
+
+.toolbar-menu-section-tip {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--on-surface-variant);
+}
+
+/* 会随模式 / 勾选换文案的说明：锁死两行的高度，换句话不撑动面板。 */
+.toolbar-menu-section-tip.tip-slot {
+  height: 28px;
+  overflow: hidden;
+}
+
+/* 随机排版的两个滑块：紧贴在「随机排版」下面，读作它的参数。
+   行高与数值栏宽度都写死，拖动滑块时面板尺寸纹丝不动。 */
+.rl-section {
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.rl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 18px;
+}
+
+.rl-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--on-surface-variant);
+  white-space: nowrap;
+}
+
+.rl-slider {
+  flex: 1;
+  min-width: 0;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.rl-value {
+  flex-shrink: 0;
+  width: 36px;
+  text-align: right;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--primary);
+}
+
+.toolbar-menu-section-tip.warn {
+  color: var(--primary);
+  opacity: 0.85;
+}
+
+/* 清理模式：智能保留 / 全部删除，两段式开关。 */
+.mode-switch {
+  display: flex;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--surface-container-high);
+}
+
+.mode-seg {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--on-surface-variant);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.mode-seg.on {
+  background: var(--surface-bright, #ffffff);
+  color: var(--primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.de-pill-group {
+  display: flex;
+  gap: 6px;
+}
+
+.de-pill {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  border: 1px solid var(--outline-variant);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--on-surface-variant);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.de-pill:hover {
+  background: var(--surface-container-high);
+}
+
+.de-pill.on {
+  border-color: rgb(var(--primary-rgb) / 0.45);
+  background: rgb(var(--primary-rgb) / 0.12);
+  color: var(--primary);
+}
+
+.de-clean-btn {
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: rgb(var(--primary-rgb) / 0.12);
+  color: var(--primary);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.de-clean-btn:hover:not(:disabled) {
+  background: rgb(var(--primary-rgb) / 0.2);
+}
+
+.de-clean-btn:disabled {
+  background: var(--surface-container-high);
+  color: var(--on-surface-variant);
+  cursor: not-allowed;
 }
 
 /* ---- 排版与字体悬浮表单面板（Teleport 到 body，视口定位） ---- */

@@ -76,6 +76,96 @@ function isWordChar(ch: string): boolean {
   return /[0-9A-Za-z\u00c0-\u024f\u4e00-\u9fff]/.test(ch);
 }
 
+/* ---------------- ASCII 引号 → 中文全角引号（智能引号录入） ----------------
+ *
+ * 中文写作语境下（行里有汉字 / 中文标点），用户按 `"` / `'` 两个半角键时不应产出
+ * 半角直引号，而应产出中文全角成对引号（“ ” 与 ‘ ’）：
+ *   · 选中文字再按 → 用全角引号把选区包起来；
+ *   · 光标前没有未闭合的同款引号、且位置可以开引号（行首 / 空白后 / 汉字或中文
+ *     标点后）→ 补出“左引号 + 右引号”，光标停在中间待命；
+ *   · 光标正压在自动补好的右引号前 → 撤掉刚打的半角引号直接跨过去；
+ *   · 其余情况（对话进行中收尾 / 前面已有未闭合左引号）→ 把刚打的半角引号换成
+ *     对应的全角右引号收尾，不重复补另一半。
+ *
+ * 纯英文/纯数字上下文（行里没有任何 CJK）保持原有英文直引号行为，不受影响。
+ */
+
+/** 半角拉丁字母 / 数字：全角引号转换只对这类字符后面的引号保留撇号语义。 */
+const LATIN_WORD_RE = /[0-9A-Za-z\u00c0-\u024f]/;
+/** CJK 汉字 + 日文假名 + 韩文 + CJK 标点（判定「中文语境」与「可开引号位置」）。 */
+const CJK_RE = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u3000-\u303f\uff00-\uffef]/;
+
+/** ASCII 引号在中文语境下应转成的全角引号对；不是 ASCII 引号返回 null。 */
+function zhQuotePairFor(ch: string): [string, string] | null {
+  if (ch === '"') return ["“", "”"];
+  if (ch === "'") return ["‘", "’"];
+  return null;
+}
+
+/** 统计文本里未配平的左引号：存在未闭合的同款左引号返回 true。 */
+function hasUnmatchedOpen(text: string, open: string, close: string): boolean {
+  let depth = 0;
+  for (const c of text) {
+    if (c === open) depth += 1;
+    else if (c === close) depth = Math.max(0, depth - 1);
+  }
+  return depth > 0;
+}
+
+/** ASCII 引号在中文语境下的校正：返回改写后文本与选区，无法确定时返回 null。 */
+function zhQuoteCorrection(
+  before: string,
+  s: number,
+  e: number,
+  after: string,
+  caret: number,
+  ch: string,
+  pair: [string, string],
+): PairEditResult | null {
+  if (!cleanInsert(before, s, e, ch, after, caret)) return null;
+
+  /* 选中一段 → 用全角引号把选区包起来，包完保持选中。 */
+  if (s !== e) {
+    const inner = before.slice(s, e);
+    return {
+      next: before.slice(0, s) + pair[0] + inner + pair[1] + before.slice(e),
+      selStart: s + pair[0].length,
+      selEnd: s + pair[0].length + inner.length,
+    };
+  }
+
+  /* 光标正压在自动补好的全角右引号前 → 撤掉刚打的半角引号，直接跨过去。 */
+  if (before.slice(s, s + pair[1].length) === pair[1]) {
+    return { next: after.slice(0, caret - 1) + after.slice(caret), selStart: caret, selEnd: caret };
+  }
+
+  const prev = before.slice(s - 1, s);
+  /* 紧跟在半角字母 / 数字后面 → 当作撇号 / 英文收尾引号，不转全角。 */
+  if (LATIN_WORD_RE.test(prev)) return null;
+
+  /* 位置可以开引号（行首 / 空白后 / 汉字后 / CJK 标点后），且前面没有未闭合的
+     同款左引号 → 开引号，并补上另一半让光标在中间待命。 */
+  const canOpen =
+    prev === "" ||
+    /\s/.test(prev) ||
+    /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(prev) ||
+    /[\u3000-\u303f\uff00-\uffef]/.test(prev);
+  if (canOpen && !hasUnmatchedOpen(before.slice(0, s), pair[0], pair[1])) {
+    return {
+      next: after.slice(0, caret - 1) + pair[0] + after.slice(caret) + pair[1],
+      selStart: caret,
+      selEnd: caret,
+    };
+  }
+
+  /* 其余情况视为收引号：把刚打的半角引号换成全角右引号，不重复补另一半。 */
+  return {
+    next: after.slice(0, caret - 1) + pair[1] + after.slice(caret),
+    selStart: caret,
+    selEnd: caret,
+  };
+}
+
 /* ---------------- 纯函数校正（供 WYSIWYG 编辑区与单测共用） ----------------
  *
  * 文档级监听的文本域通道把「快照 + 校正」拆成了两步，但校正那一半其实不依赖
@@ -106,6 +196,8 @@ function cleanInsert(
  * 键入一个字符后的成对标点校正（纯函数）。
  *
  * 与文本域通道同一套规则：
+ *   0. ASCII 引号落在中文语境（行里有汉字 / 中文标点）→ 转中文全角引号：
+ *      选包 / 开引号自动补另一半 / 跨过右引号 / 收引号（见 zhQuoteCorrection）；
  *   1. 原本选中一段 → 用这个左标点把整段包起来，包完保持选中；
  *   2. 光标正压在同一个右标点上 → 撤掉刚打的字符直接跨过去
  *      （同形引号借此自动区分开合，不写出重复的一半）；
@@ -125,6 +217,12 @@ export function computeInsertPairCorrection(
   const s = Math.min(beforeStart, beforeEnd);
   const e = Math.max(beforeStart, beforeEnd);
   const collapsed = s === e;
+
+  /* 0) ASCII 引号 + 中文语境（或空块，中文写作应用默认按中文处理）→ 智能转中文全角引号。 */
+  const zhPair = zhQuotePairFor(ch);
+  if (zhPair && (CJK_RE.test(before) || before.length === 0)) {
+    return zhQuoteCorrection(before, s, e, after, caret, ch, zhPair);
+  }
 
   /* 1) 原本选中了一段 → 整段包起来，包完保持选中。 */
   if (!collapsed) {
@@ -281,39 +379,12 @@ function handleInsert(el: PairableElement, ch: string, snap: Snapshot | undefine
           selEnd: caret - ch.length,
         };
 
-  const selStart = Math.min(before.selStart, before.selEnd);
-  const selEnd = Math.max(before.selStart, before.selEnd);
-  const collapsed = selStart === selEnd;
-
-  /* 1) 光标原本正压在同一个右标点上 → 把刚打的这个撤掉，直接跨过去，
-        不写出重复的一半。同形引号（"）也走这条，等于自动区分了开合。 */
-  if (
-    collapsed &&
-    CLOSERS.has(ch) &&
-    before.value.slice(selStart, selStart + ch.length) === ch
-  ) {
-    apply(el, curr.slice(0, caret - ch.length) + curr.slice(caret), caret, caret);
-    return;
-  }
-
-  const close = OPEN_TO_CLOSE.get(ch);
-  if (!close) return;
-
-  /* 2) 原本选中了一段 → 浏览器已经用这个字符把选区替换掉了，
-        用快照把它整段包起来重建回来，包完保持选中。 */
-  if (!collapsed) {
-    const inner = before.value.slice(selStart, selEnd);
-    const next =
-      before.value.slice(0, selStart) + ch + inner + close + before.value.slice(selEnd);
-    apply(el, next, selStart + ch.length, selStart + ch.length + inner.length);
-    return;
-  }
-
-  /* 3) 同形引号紧跟在词内字符后面，按撇号 / 收尾引号处理，不补全。 */
-  if (SYMMETRIC.has(ch) && isWordChar(before.value.slice(selStart - 1, selStart))) return;
-
-  /* 4) 普通补全：另一半贴在光标后面，光标原地待命。 */
-  apply(el, curr.slice(0, caret) + close + curr.slice(caret), caret, caret);
+  /* 与 WYSIWYG 共用同一份纯函数校正（含 ASCII → 中文全角引号智能转换）。 */
+  const a = Math.min(before.selStart, before.selEnd);
+  const b = Math.max(before.selStart, before.selEnd);
+  const result = computeInsertPairCorrection(before.value, a, b, curr, caret, ch);
+  if (!result) return;
+  apply(el, result.next, result.selStart, result.selEnd);
 }
 
 /* ---------------- 退格 ---------------- */
