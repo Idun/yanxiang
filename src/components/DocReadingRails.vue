@@ -1076,8 +1076,8 @@ function jumpToBlock(target: string) {
               v-if="p.place"
               class="place-ic"
               :style="{
-                color: PLACE_ICON_COLORS[p.place.icon]?.color || 'var(--primary, #0284c7)',
-                background: PLACE_ICON_COLORS[p.place.icon]?.bg || 'rgb(var(--primary-rgb, 2 132 199) / 0.14)'
+                color: (PLACE_ICON_COLORS as any)[p.place.icon]?.color || 'var(--primary, #0284c7)',
+                background: (PLACE_ICON_COLORS as any)[p.place.icon]?.bg || 'rgb(var(--primary-rgb, 2 132 199) / 0.14)'
               }"
             >
               {{ p.label.slice(0, 1) }}

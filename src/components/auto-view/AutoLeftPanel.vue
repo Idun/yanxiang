@@ -89,7 +89,7 @@ const emit = defineEmits<{
           type="button"
           @click="emit('update:leftActiveTab', 'source')"
         >
-          <span>素材来源</span>
+          <span>新素材</span>
           <span
             v-if="props.selectedSessionSources.length > 0"
             class="left-tab-badge"
@@ -499,8 +499,8 @@ const emit = defineEmits<{
 .left-panel-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 8px 10px;
+  gap: 3px;
+  padding: 6px 8px;
   background-color: var(--surface-container-lowest);
   border-bottom: 1px solid var(--outline-variant);
   flex-shrink: 0;
@@ -511,13 +511,13 @@ const emit = defineEmits<{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 6px 10px;
+  gap: 4px;
+  padding: 5px 8px;
   border-radius: 6px;
   border: 1px solid transparent;
   background-color: transparent;
   color: var(--on-surface-variant);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;

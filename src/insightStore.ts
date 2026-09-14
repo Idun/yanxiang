@@ -30,7 +30,7 @@ export interface ToastState {
   visible: boolean;
   title: string;
   desc: string;
-  icon: "habit" | "edit" | "style";
+  icon: "habit" | "edit" | "style" | "warn";
   timeout: number | null;
 }
 

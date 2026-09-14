@@ -2,13 +2,11 @@
 import { computed } from "vue";
 import {
   ClipboardPaste,
-  FilePlus,
   FileText,
-  Sparkles,
   Trash2,
   Type,
 } from "lucide-vue-next";
-import type { AiTurn } from "../autoStore";
+import type { AiTurn } from "../../autoStore";
 
 interface Props {
   turn?: AiTurn | null;

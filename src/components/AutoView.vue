@@ -37,6 +37,7 @@ import {
   Sparkles,
   Square,
   CheckSquare,
+  Shield,
   Trash2,
   Type,
   UserRound,
@@ -134,6 +135,9 @@ import { pulseAiDocEdit } from "../aiDocActivity";
 import { startLongPressDrag } from "../longPressDrag";
 import ReaderResultInline from "./ReaderResultInline.vue";
 import AutoBlankDoc from "./auto-view/AutoBlankDoc.vue";
+import AutoWorkflowBar, { type WorkflowStepId } from "./auto-view/AutoWorkflowBar.vue";
+import AutoStoryStateTracker from "./auto-view/AutoStoryStateTracker.vue";
+import { storyStateStore } from "./auto-view/storyStateStore";
 import {
   liveHtmlToMarkdown,
   liveNodeToMarkdown,
@@ -149,17 +153,31 @@ const outputTargetType = toRef(autoStore, "outputTargetType");
 const articleLength = toRef(autoStore, "articleLength");
 const newSourceText = ref("");
 
-/* ---------------- 左右面板宽度：默认值固定，仅本次会话内可拖拽 ----------------
-   不做持久化，下次启动自动回到默认宽度（产品要求）。*/
-const DEFAULT_LEFT_WIDTH = 260;
-const DEFAULT_RIGHT_WIDTH = 360;
-const LEFT_MIN = 200;
-const LEFT_MAX = 420;
-const RIGHT_MIN = 300;
-const RIGHT_MAX = 540;
+/* ---------------- 左右面板宽度：默认左 230px / 右 390px，支持拖拽与持久化 ---------------- */
+const DEFAULT_LEFT_WIDTH = 230;
+const DEFAULT_RIGHT_WIDTH = 390;
+const LEFT_MIN = 180;
+const LEFT_MAX = 400;
+const RIGHT_MIN = 320;
+const RIGHT_MAX = 560;
 
-const leftWidth = ref(DEFAULT_LEFT_WIDTH);
-const rightWidth = ref(DEFAULT_RIGHT_WIDTH);
+const STORAGE_KEY_LEFT_WIDTH = "auto_panel_left_width_v2";
+const STORAGE_KEY_RIGHT_WIDTH = "auto_panel_right_width_v2";
+
+function loadSavedPanelWidth(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const val = localStorage.getItem(key);
+    if (!val) return fallback;
+    const parsed = parseInt(val, 10);
+    if (isNaN(parsed)) return fallback;
+    return clampWidth(parsed, min, max);
+  } catch {
+    return fallback;
+  }
+}
+
+const leftWidth = ref(loadSavedPanelWidth(STORAGE_KEY_LEFT_WIDTH, DEFAULT_LEFT_WIDTH, LEFT_MIN, LEFT_MAX));
+const rightWidth = ref(loadSavedPanelWidth(STORAGE_KEY_RIGHT_WIDTH, DEFAULT_RIGHT_WIDTH, RIGHT_MIN, RIGHT_MAX));
 const resizingSide = ref<"left" | "right" | null>(null);
 
 const isRightPanelCollapsed = ref(false);
@@ -184,9 +202,19 @@ function startPanelResize(side: "left" | "right", event: MouseEvent) {
     const delta = e.clientX - startX;
     if (side === "left") {
       leftWidth.value = clampWidth(startLeft + delta, LEFT_MIN, LEFT_MAX);
+      try {
+        localStorage.setItem(STORAGE_KEY_LEFT_WIDTH, String(leftWidth.value));
+      } catch {
+        // ignore
+      }
     } else {
       /* 右栏分隔线往左拖 = 变宽，所以取反。*/
       rightWidth.value = clampWidth(startRight - delta, RIGHT_MIN, RIGHT_MAX);
+      try {
+        localStorage.setItem(STORAGE_KEY_RIGHT_WIDTH, String(rightWidth.value));
+      } catch {
+        // ignore
+      }
     }
   };
 
@@ -202,8 +230,21 @@ function startPanelResize(side: "left" | "right", event: MouseEvent) {
 
 /** 双击分隔线复位到默认宽度。*/
 function resetPanelWidth(side: "left" | "right") {
-  if (side === "left") leftWidth.value = DEFAULT_LEFT_WIDTH;
-  else rightWidth.value = DEFAULT_RIGHT_WIDTH;
+  if (side === "left") {
+    leftWidth.value = DEFAULT_LEFT_WIDTH;
+    try {
+      localStorage.setItem(STORAGE_KEY_LEFT_WIDTH, String(DEFAULT_LEFT_WIDTH));
+    } catch {
+      // ignore
+    }
+  } else {
+    rightWidth.value = DEFAULT_RIGHT_WIDTH;
+    try {
+      localStorage.setItem(STORAGE_KEY_RIGHT_WIDTH, String(DEFAULT_RIGHT_WIDTH));
+    } catch {
+      // ignore
+    }
+  }
 }
 
 /* ---------------- 中间区创作设定表单（无正文时呈现） ----------------
@@ -450,11 +491,19 @@ function buildSetupDirective(): string {
 }
 
 /* ---------------- Left Panel: Tabs for Source Material and Drafts ----------------
-   左侧面板当前激活的标签页（素材来源 / 文稿）与文件夹折叠状态都要跨会话持久化，
+   左侧面板当前激活的标签页（素材来源 / 文稿 / 状态表）与文件夹折叠状态都要跨会话持久化，
    重启后保持用户上次的选择（由 autoStore 统一落库）。 */
-const leftActiveTab = computed({
-  get: () => autoStore.leftPanelTab,
-  set: (val) => (autoStore.leftPanelTab = val),
+const leftTabState = ref<"source" | "drafts" | "state">(
+  (autoStore.leftPanelTab as any) || "source"
+);
+const leftActiveTab = computed<"source" | "drafts" | "state">({
+  get: () => leftTabState.value,
+  set: (val) => {
+    leftTabState.value = val;
+    if (val === "source" || val === "drafts") {
+      autoStore.leftPanelTab = val;
+    }
+  },
 });
 
 /* ---------------- Left Panel: Session-only Temporary Source Material Input (解耦) ---------------- */
@@ -4530,6 +4579,12 @@ function buildNextChapterPrompt(): string {
     );
   }
 
+  // 读取状态追踪表，确保写新章前掌握等级、装备、伏笔与当前要点
+  const stateLedgerPrompt = storyStateStore.formatStatePromptForChapter();
+  if (stateLedgerPrompt) {
+    contextParts.push(stateLedgerPrompt);
+  }
+
   const extraContext = contextParts.length > 0 ? "\n\n" + contextParts.join("\n\n") : "";
   const targetName = state.chapterTitle || (state.targetChapterNum ? `第 ${state.targetChapterNum} 章` : "下一章");
 
@@ -5320,7 +5375,23 @@ ${sourceTurn.content}
 
     /* 正文/大纲完整输出即消费掉素材与定制勾选：本轮要求已被写进 AiTurn.prompt
        并留在对话上下文中，后续章纲/对话话本等无需再重复发送。 */
-    if (!t.incomplete) clearConsumedSelections();
+    if (!t.incomplete) {
+      clearConsumedSelections();
+      // 正文写完后，自动更新故事状态追踪表（等级突破、新获装备、埋下伏笔）
+      if (
+        variant === "next_chapter" ||
+        (variant === "refresh" &&
+          !isOutlineTurn(t) &&
+          !isChapterOutlineTurn(t) &&
+          !isAuditOrReaderTurn(t)) ||
+        (variant === "rewrite" &&
+          !isOutlineTurn(t) &&
+          !isChapterOutlineTurn(t) &&
+          !isAuditOrReaderTurn(t))
+      ) {
+        storyStateStore.autoUpdateStoryStateFromChapter(t.content, turnLabel(t));
+      }
+    }
 
     if (variant === "refresh") {
       showToast("处理完成", "AI 已生成完正文，可切回「自动」界面查看", "habit");
@@ -5855,6 +5926,147 @@ async function runNextChapter(sourceTurn?: AiTurn) {
       initialReasoning: `已锁定细纲上下文，正在推进创作【${state.chapterTitle || `第 ${state.targetChapterNum} 章`}】正文...`,
       sourceTurn,
     });
+  }
+}
+
+/* ---------------- 故事创作五步工作流编排状态与动作 ---------------- */
+const hasNovelOutline = computed(() =>
+  aiTurns.value.some((t) => isOutlineTurn(t))
+);
+
+const hasChapterOutline = computed(() =>
+  aiTurns.value.some((t) => isChapterOutlineTurn(t))
+);
+
+const currentChapterDisplayTitle = computed(() => {
+  if (nextChapterState.value.chapterTitle) {
+    return nextChapterState.value.chapterTitle;
+  }
+  const latest = aiMessage.value;
+  return latest?.title || (latest?.content ? turnLabel(latest) : "");
+});
+
+const totalDraftChapters = computed(
+  () =>
+    aiTurns.value.filter(
+      (t) =>
+        !isOutlineTurn(t) && !isChapterOutlineTurn(t) && !isAuditOrReaderTurn(t)
+    ).length
+);
+
+const currentWorkflowStep = ref<WorkflowStepId>(
+  totalDraftChapters.value > 0
+    ? "drafting"
+    : hasChapterOutline.value
+    ? "drafting"
+    : hasNovelOutline.value
+    ? "chapter_outline"
+    : "outline"
+);
+
+function isWorkflowStepAccessible(step: WorkflowStepId): boolean {
+  if (step === "outline") return true;
+  if (step === "chapter_outline") return hasNovelOutline.value;
+  if (step === "drafting") return hasChapterOutline.value;
+  if (step === "state_ledger") return totalDraftChapters.value > 0;
+  if (step === "audit_review") return totalDraftChapters.value > 0;
+  return false;
+}
+
+const isAuditOrReaderMode = computed(
+  () => writingMode.value === "auditor" || writingMode.value === "reader"
+);
+
+function handleSelectWorkflowStep(step: WorkflowStepId) {
+  if (!isWorkflowStepAccessible(step)) {
+    if (step === "chapter_outline") {
+      showToast("流程未解锁", "请先在步骤一构思并生成故事大纲", "warn");
+    } else if (step === "drafting") {
+      showToast("流程未解锁", "请先在步骤二规划并生成章节细纲", "warn");
+    } else if (step === "state_ledger") {
+      showToast("流程未解锁", "请先在步骤三起草正文后解锁状态追踪表", "warn");
+    } else if (step === "audit_review") {
+      showToast("流程未解锁", "请先在步骤三起草正文后再进行审评与重写", "warn");
+    }
+    return;
+  }
+  currentWorkflowStep.value = step;
+  if (step === "outline") {
+    writingMode.value = "writer";
+    leftActiveTab.value = "source";
+  } else if (step === "chapter_outline") {
+    writingMode.value = "writer";
+  } else if (step === "drafting") {
+    writingMode.value = "writer";
+    leftActiveTab.value = "drafts";
+  } else if (step === "state_ledger") {
+    leftActiveTab.value = "state";
+  } else if (step === "audit_review") {
+    writingMode.value = "auditor";
+  }
+}
+
+async function handleWorkflowTriggerOutline() {
+  currentWorkflowStep.value = "outline";
+  writingMode.value = "writer";
+  activeGeneratingAction.value = "normal";
+  await startGenerationCore("outline");
+}
+
+async function handleWorkflowTriggerChapterOutline() {
+  if (!hasNovelOutline.value) {
+    showToast("提示", "请先完成第1步故事大纲，再生成章节细纲", "warn");
+    return;
+  }
+  currentWorkflowStep.value = "chapter_outline";
+  writingMode.value = "writer";
+  await startChapterOutlineGeneration();
+}
+
+function handleWorkflowTriggerAudit() {
+  if (totalDraftChapters.value === 0) {
+    showToast("提示", "尚无起草正文，请先在步骤三起草正文", "warn");
+    return;
+  }
+  currentWorkflowStep.value = "audit_review";
+  writingMode.value = "auditor";
+  startGeneration();
+}
+
+function handleWorkflowTriggerReader() {
+  if (totalDraftChapters.value === 0) {
+    showToast("提示", "尚无起草正文，请先在步骤三起草正文", "warn");
+    return;
+  }
+  currentWorkflowStep.value = "audit_review";
+  writingMode.value = "reader";
+  startGeneration();
+}
+
+async function handleWorkflowTriggerRewrite() {
+  if (totalDraftChapters.value === 0) {
+    showToast("提示", "尚无起草正文，请先在步骤三起草正文", "warn");
+    return;
+  }
+  const turn = aiMessage.value;
+  const feedback = latestFeedbackContext(turn);
+  if (!feedback) {
+    showToast("提示", "请先在上方点击「审核意见」或「读者评估」出具审评意见", "edit");
+    return;
+  }
+  await runVariantGeneration("rewrite", turn);
+}
+
+function handleWorkflowToggleStateLedger() {
+  if (totalDraftChapters.value === 0) {
+    showToast("提示", "需先在步骤三起草正文后解锁状态追踪表", "warn");
+    return;
+  }
+  if (leftActiveTab.value === "state") {
+    leftActiveTab.value = "drafts";
+  } else {
+    leftActiveTab.value = "state";
+    currentWorkflowStep.value = "state_ledger";
   }
 }
 
@@ -6482,34 +6694,74 @@ function clearOutput() {
       </div>
     </div>
 
-    <!-- Main Workspace 3-Column Seamless Layout -->
-    <div v-else class="auto-workspace">
-      <!-- Left Panel: Tabs for Source Material and Document Drafts (300px width) -->
-      <aside class="left-panel" :style="{ width: leftWidth + 'px' }">
-        <!-- Left Panel Horizontal Tab Bar -->
-        <div class="left-panel-tabs">
-          <button
-            class="left-tab-btn"
-            :class="{ active: leftActiveTab === 'source' }"
-            type="button"
-            @click="leftActiveTab = 'source'"
-          >
-            <Sparkles :size="14" />
-            素材来源
-          </button>
-          <button
-            class="left-tab-btn"
-            :class="{ active: leftActiveTab === 'drafts' }"
-            type="button"
-            @click="leftActiveTab = 'drafts'"
-          >
-            <FileText :size="14" />
-            文稿
-            <span v-if="aiTurns.length > 0" class="left-tab-badge">
-              {{ aiTurns.length }}
-            </span>
-          </button>
-        </div>
+    <!-- Main Workspace with Workflow Pipeline Bar -->
+    <template v-else>
+      <!-- 故事创作五步工作流流水线导航条 -->
+      <AutoWorkflowBar
+        :current-step="currentWorkflowStep"
+        :has-outline="hasNovelOutline"
+        :has-chapter-outline="hasChapterOutline"
+        :current-chapter-title="currentChapterDisplayTitle"
+        :total-chapters="totalDraftChapters"
+        :is-generating="isGenerating"
+        :is-audit-or-reader-mode="isAuditOrReaderMode"
+        :can-next-chapter="!nextChapterState.disabled"
+        :next-chapter-tooltip="nextChapterState.tooltip"
+        @select-step="handleSelectWorkflowStep"
+        @trigger-outline="handleWorkflowTriggerOutline"
+        @trigger-chapter-outline="handleWorkflowTriggerChapterOutline"
+        @trigger-next-chapter="runNextChapter(aiMessage)"
+        @trigger-audit="handleWorkflowTriggerAudit"
+        @trigger-reader="handleWorkflowTriggerReader"
+        @trigger-rewrite-audit="handleWorkflowTriggerRewrite"
+        @toggle-state-ledger="handleWorkflowToggleStateLedger"
+      />
+
+      <!-- Main Workspace 3-Column Seamless Layout -->
+      <div class="auto-workspace">
+        <!-- Left Panel: Tabs for Source Material, Drafts, and Story State Ledger (300px width) -->
+        <aside class="left-panel" :style="{ width: leftWidth + 'px' }">
+          <!-- Left Panel Horizontal Tab Bar -->
+          <div class="left-panel-tabs">
+            <button
+              class="left-tab-btn"
+              :class="{ active: leftActiveTab === 'source' }"
+              type="button"
+              @click="leftActiveTab = 'source'"
+            >
+              <Sparkles :size="14" />
+              新素材
+            </button>
+            <button
+              class="left-tab-btn"
+              :class="{ active: leftActiveTab === 'drafts' }"
+              type="button"
+              @click="leftActiveTab = 'drafts'"
+            >
+              <FileText :size="14" />
+              文稿
+              <span v-if="aiTurns.length > 0" class="left-tab-badge">
+                {{ aiTurns.length }}
+              </span>
+            </button>
+            <button
+              class="left-tab-btn"
+              :class="{
+                active: leftActiveTab === 'state',
+                disabled: totalDraftChapters === 0,
+              }"
+              :disabled="totalDraftChapters === 0"
+              type="button"
+              :title="totalDraftChapters === 0 ? '未解锁：需先在步骤三起草正文' : '故事状态追踪表（等级、装备、伏笔与要点）'"
+              @click="handleWorkflowToggleStateLedger"
+            >
+              <Shield :size="14" />
+              状态表
+              <span v-if="storyStateStore.ledger.characters.length > 0 && totalDraftChapters > 0" class="left-tab-badge">
+                {{ storyStateStore.ledger.characters.length }}
+              </span>
+            </button>
+          </div>
 
         <!-- Tab Content 1: 素材来源 -->
         <div v-show="leftActiveTab === 'source'" class="panel-inner space-y-6 pt-4">
@@ -6816,6 +7068,14 @@ function clearOutput() {
               历史对话
             </button>
           </div>
+        </div>
+
+        <!-- Tab Content 3: 故事状态追踪表（等级、装备、伏笔、要点独立分存） -->
+        <div v-show="leftActiveTab === 'state'" class="flex-1 min-h-0 flex flex-col overflow-hidden -mx-3.5 -mb-5 mt-2">
+          <AutoStoryStateTracker
+            :current-doc-title="turnLabel(aiMessage)"
+            :current-doc-content="aiMessage.content"
+          />
         </div>
       </aside>
 
@@ -9439,6 +9699,7 @@ function clearOutput() {
         </div>
       </aside>
     </div>
+  </template>
 
     <!-- "下一章" 禁用时的友好说明气泡（fixed 定位，跟随按钮锚点）
          position: fixed 以视口为定位基准，不受祖先 overflow 裁剪影响。 -->
@@ -9489,11 +9750,11 @@ function clearOutput() {
 .left-panel-tabs {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px;
+  gap: 4px;
+  padding: 3px;
   background-color: var(--surface-container-low);
   border: 1px solid var(--outline-variant);
-  border-radius: 10px;
+  border-radius: 8px;
   margin-bottom: 6px;
   flex-shrink: 0;
 }
@@ -9503,23 +9764,29 @@ function clearOutput() {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 7px;
+  gap: 4px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
   border: none;
   background: transparent;
   color: var(--on-surface-variant);
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.18s ease;
   white-space: nowrap;
 }
 
-.left-tab-btn:hover {
+.left-tab-btn:hover:not(:disabled) {
   color: var(--on-surface);
   background-color: rgba(var(--primary-rgb) / 0.05);
+}
+
+.left-tab-btn:disabled,
+.left-tab-btn.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .left-tab-btn.active {

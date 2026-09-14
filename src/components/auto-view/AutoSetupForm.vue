@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Check, FilePlus, History, Pencil, Plus, Sparkles, Wand2, X } from "lucide-vue-next";
+import { Check, FilePlus, History, Pencil, Sparkles, Wand2, X } from "lucide-vue-next";
 
 export interface SetupOption {
   id: string;

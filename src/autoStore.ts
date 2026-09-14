@@ -30,6 +30,8 @@ export interface AiTurn {
   parentId?: number;
   /** 变体动作标识（refresh / structure / technique / ending / rewrite 等）。 */
   variant?: string;
+  /** 是否为空白独立文稿 */
+  isBlankDoc?: boolean;
 }
 
 export interface DraftFolder {
