@@ -44,9 +44,21 @@ import {
   pruneReadingPositions,
   readingPositionStore,
 } from "./readingPositionStore";
+import {
+  autoReadingPositionStore,
+  exportAutoReadingPosition,
+  importAutoReadingPosition,
+} from "./autoReadingPosition";
+import {
+  docInsightStore,
+  exportDocInsights,
+  importDocInsights,
+  pruneDocInsights,
+} from "./docInsightStore";
 import { insightStore, refreshInsights } from "./insightStore";
 import { bootHomeStore } from "./homeStore";
 import { bootRevisionStore } from "./revisionStore";
+import { bootAutoStore } from "./autoStore";
 import { exportTokenUsage, importTokenUsage, tokenStore } from "./tokenStore";
 import { exportMap, importMap, mapStore, pruneMissingCards } from "./mapStore";
 import { rebuildInsightVectorIndex } from "./vectorStore";
@@ -70,6 +82,7 @@ import { AUDITOR_AGENT_PROMPT } from "./prompts/auditorAgent";
 import { READER_AGENT_PROMPT } from "./prompts/readerAgent";
 import { REFINE_AGENT_PROMPT } from "./prompts/refineAgent";
 import { CHAT_AGENT_PROMPT } from "./prompts/chatAgent";
+import { CHAPTER_OUTLINE_AGENT_PROMPT } from "./prompts/chapterOutlineAgent";
 
 let booted = false;
 
@@ -89,8 +102,14 @@ let booted = false;
    「标点写法照原文、句末对齐原文、句内断句可为改写需要而调整」。
    必须重同步，否则老用户仍沿用那份让模型不改的提示词。
    v6: 审核员提示词补充说明：明确指示审核员在评估时需读取并参考知识库中用户新增的知识文件。
-   必须重同步，确保审核员智能体准确读取新加载的文档知识。 */
-const PROMPT_SYNC_VERSION = 6;
+   必须重同步，确保审核员智能体准确读取新加载的文档知识。
+   v7: 写手提示词补充说明：明确指示写手在写作/改写时主动使用 read_knowledge / search_knowledge 工具查阅并参考知识库中的其他新文档/新标准。
+   必须重同步，确保写手智能体主动查阅并使用新增的知识文档。
+   v8: 新增「章纲生成」提示词（设置面板 →「章纲」选项卡）：完整重写了章节细纲提示词结构，
+   并把模板移入 prompts/chapterOutlineAgent.ts 供用户编辑 / 恢复默认 / 随设置持久化。
+   v9: 章纲模板与提示词新增【伏笔】要求（每章 3-5 条，标注后文章节与因果闭环），
+   且「不要省略」清单同步纳入【伏笔】。必须重同步，确保已存提示词带伏笔章节细纲格式。 */
+const PROMPT_SYNC_VERSION = 9;
 
 export async function initPersistence() {
   if (booted) return;
@@ -126,12 +145,17 @@ export async function initPersistence() {
     settings.chatPrompt?.trim()
       ? settings.chatPrompt
       : CHAT_AGENT_PROMPT;
+  aiSettings.chapterOutlinePrompt =
+    settings.chapterOutlinePrompt?.trim()
+      ? settings.chapterOutlinePrompt
+      : CHAPTER_OUTLINE_AGENT_PROMPT;
   if (settings.promptSyncVersion !== String(PROMPT_SYNC_VERSION)) {
     aiSettings.writerPrompt = WRITER_AGENT_PROMPT;
     aiSettings.auditorPrompt = AUDITOR_AGENT_PROMPT;
     aiSettings.readerPrompt = READER_AGENT_PROMPT;
     aiSettings.refinePrompt = REFINE_AGENT_PROMPT;
     aiSettings.chatPrompt = CHAT_AGENT_PROMPT;
+    aiSettings.chapterOutlinePrompt = CHAPTER_OUTLINE_AGENT_PROMPT;
     /* 版本不匹配才落盘：把最新默认提示词写进持久化并同步版本号。
        只更新内存、等深 watch 捎带走是不可靠的——用户升级后如果不改任何
        设置，深 watch 不会触发，第二次启动就会按「已同步」读回旧的提示词。 */
@@ -141,6 +165,7 @@ export async function initPersistence() {
       { key: "readerPrompt", value: READER_AGENT_PROMPT },
       { key: "refinePrompt", value: REFINE_AGENT_PROMPT },
       { key: "chatPrompt", value: CHAT_AGENT_PROMPT },
+      { key: "chapterOutlinePrompt", value: CHAPTER_OUTLINE_AGENT_PROMPT },
       { key: "promptSyncVersion", value: String(PROMPT_SYNC_VERSION) },
     ]);
   }
@@ -418,6 +443,26 @@ export async function initPersistence() {
   }
   pruneReadingPositions(documentFilesStore.files.map((f) => f.id));
 
+  /* Restore 自动界面中间区阅读停留位置（单一会话，只记一份）。 */
+  if (settings.autoReadingPosition) {
+    try {
+      importAutoReadingPosition(JSON.parse(settings.autoReadingPosition));
+    } catch {
+      /* keep default */
+    }
+  }
+
+  /* Restore 文档阅读侧栏的 AI 提取缓存（人物星图 / 地图地点，按文档条目记忆）。
+     必须排在文档树之后：恢复完才知道哪些文档还在，顺手清掉已删除文档的残留。 */
+  if (settings.docInsightExtractions) {
+    try {
+      importDocInsights(JSON.parse(settings.docInsightExtractions));
+    } catch {
+      /* keep default */
+    }
+  }
+  pruneDocInsights(documentFilesStore.files.map((f) => f.id));
+
   /* Migrate any pre-existing single document into the default Main file. */
   if (docStore.markdown) {
     const target =
@@ -578,6 +623,9 @@ export async function initPersistence() {
      记录的「最近打开」指向的是真实存在的文档。 */
   await bootHomeStore();
 
+  /* 自动界面数据 */
+  await bootAutoStore();
+
   /* 修订与批注图层：同样要在文档树恢复之后，孤立图层才能被正确清理。
      图层自带落库监听，恢复完成后才会开始写入。 */
   await bootRevisionStore();
@@ -679,6 +727,7 @@ export async function initPersistence() {
         { key: "readerPrompt", value: s.readerPrompt },
         { key: "refinePrompt", value: s.refinePrompt },
         { key: "chatPrompt", value: s.chatPrompt },
+        { key: "chapterOutlinePrompt", value: s.chapterOutlinePrompt },
         { key: "writerKnowledge", value: writerKnowledge },
         { key: "auditorKnowledge", value: auditorKnowledge },
         { key: "readerKnowledge", value: readerKnowledge },
@@ -909,6 +958,49 @@ export async function initPersistence() {
           /* ignore */
         }
       }, 800);
+    },
+    { deep: true },
+  );
+
+  /* 自动界面阅读停留位置：AutoView 把滚动合并到停手后才写 store，这里再叠一层节流。 */
+  let autoReadingPosTimer: number | null = null;
+  watch(
+    () => autoReadingPositionStore.main,
+    () => {
+      if (autoReadingPosTimer !== null) return;
+      autoReadingPosTimer = window.setTimeout(() => {
+        autoReadingPosTimer = null;
+        try {
+          void saveSettings([
+            {
+              key: "autoReadingPosition",
+              value: JSON.stringify(exportAutoReadingPosition()),
+            },
+          ]);
+        } catch {
+          /* ignore */
+        }
+      }, 800);
+    },
+    { deep: true },
+  );
+
+  /* 文档阅读侧栏的 AI 提取缓存：AI 提取是一次性低频动作，这里直接钉一层节流即可。 */
+  let docInsightTimer: number | null = null;
+  watch(
+    () => docInsightStore.data,
+    () => {
+      if (docInsightTimer !== null) return;
+      docInsightTimer = window.setTimeout(() => {
+        docInsightTimer = null;
+        try {
+          void saveSettings([
+            { key: "docInsightExtractions", value: JSON.stringify(exportDocInsights()) },
+          ]);
+        } catch {
+          /* ignore */
+        }
+      }, 400);
     },
     { deep: true },
   );

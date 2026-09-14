@@ -4,6 +4,7 @@ import { WRITER_AGENT_PROMPT } from "./prompts/writerAgent";
 import { AUDITOR_AGENT_PROMPT } from "./prompts/auditorAgent";
 import { READER_AGENT_PROMPT } from "./prompts/readerAgent";
 import { REFINE_AGENT_PROMPT } from "./prompts/refineAgent";
+import { CHAPTER_OUTLINE_AGENT_PROMPT } from "./prompts/chapterOutlineAgent";
 import {
   BUNDLED_AUDITOR_KNOWLEDGE,
   BUNDLED_CHAT_KNOWLEDGE,
@@ -309,6 +310,8 @@ export const aiSettings = reactive({
   auditorPrompt: AUDITOR_AGENT_PROMPT,
   readerPrompt: READER_AGENT_PROMPT,
   refinePrompt: REFINE_AGENT_PROMPT,
+  /* 「章纲生成」提示词：设置面板 →「章纲」选项卡可编辑 / 恢复默认。 */
+  chapterOutlinePrompt: CHAPTER_OUTLINE_AGENT_PROMPT,
   /* 「对话」标签页的提示词与知识项（设置面板 → 对话 选项卡）。 */
   chatPrompt: CHAT_AGENT_PROMPT,
   chatKnowledge: [] as KnowledgeFile[],

@@ -46,6 +46,7 @@ import { WRITER_AGENT_PROMPT } from "../prompts/writerAgent";
 import { AUDITOR_AGENT_PROMPT } from "../prompts/auditorAgent";
 import { READER_AGENT_PROMPT } from "../prompts/readerAgent";
 import { REFINE_AGENT_PROMPT } from "../prompts/refineAgent";
+import { CHAPTER_OUTLINE_AGENT_PROMPT } from "../prompts/chapterOutlineAgent";
 import { vectorStore, rebuildInsightVectorIndex } from "../vectorStore";
 // 应用图标：直接引用 Tauri 打包所用的同一份图标，避免副本不同步
 import appIconUrl from "../../src-tauri/icons/128x128@2x.png";
@@ -62,7 +63,7 @@ import {
 import { renderForReading } from "../markdown";
 import { showToast } from "../insightStore";
 
-type SettingsTab = "api" | "config" | "contentColor" | "shortcuts" | "chat" | "writer" | "auditor" | "reader" | "refine" | "vector" | "about";
+type SettingsTab = "api" | "config" | "contentColor" | "shortcuts" | "chat" | "writer" | "auditor" | "reader" | "chapter" | "refine" | "vector" | "about";
 const activeTab = ref<SettingsTab>("api");
 
 /* ---- 快捷键清单（表单：名称 + 快捷键） ---- */
@@ -512,17 +513,19 @@ function resetRingLayout() {
 /** 已被挪动过的圆环数量（默认位置不入库，所以键数即挪动过的位点数）。 */
 const ringPositionCount = computed(() => Object.keys(readingRingStore.positions).length);
 
-function restorePrompt(type: "writer" | "auditor" | "reader" | "refine") {
+function restorePrompt(type: "writer" | "auditor" | "reader" | "refine" | "chapter") {
   const defaults = {
     writer: WRITER_AGENT_PROMPT,
     auditor: AUDITOR_AGENT_PROMPT,
     reader: READER_AGENT_PROMPT,
     refine: REFINE_AGENT_PROMPT,
+    chapter: CHAPTER_OUTLINE_AGENT_PROMPT,
   };
   if (type === "writer") aiSettings.writerPrompt = defaults.writer;
   else if (type === "auditor") aiSettings.auditorPrompt = defaults.auditor;
   else if (type === "reader") aiSettings.readerPrompt = defaults.reader;
-  else aiSettings.refinePrompt = defaults.refine;
+  else if (type === "refine") aiSettings.refinePrompt = defaults.refine;
+  else aiSettings.chapterOutlinePrompt = defaults.chapter;
 }
 
 /* ---------------- API type driven endpoints ---------------- */
@@ -1103,6 +1106,10 @@ onBeforeUnmount(() => {
             <BookOpen :size="16" :stroke-width="1.8" />
             读者
           </button>
+          <button class="nav-item" :class="{ active: activeTab === 'chapter' }" @click="activeTab = 'chapter'">
+            <FileText :size="16" :stroke-width="1.8" />
+            章纲
+          </button>
           <button class="nav-item" :class="{ active: activeTab === 'refine' }" @click="activeTab = 'refine'">
             <FileText :size="16" :stroke-width="1.8" />
             精修
@@ -1128,6 +1135,7 @@ onBeforeUnmount(() => {
               activeTab === 'writer' ? 'AI写作设置' :
               activeTab === 'auditor' ? '审核员设置' :
               activeTab === 'reader' ? '读者评估设置' :
+              activeTab === 'chapter' ? '章纲设置' :
               activeTab === 'refine' ? '精修设置' :
               activeTab === 'vector' ? '向量数据' : '关于'
             }}</h2>
@@ -2036,6 +2044,29 @@ onBeforeUnmount(() => {
 
               <p class="reader-settings-note">
                 读者评估页默认加载「网文读者受众画像与心理研究、真实书评语料、爽点毒点清单」三份知识项；同时它还会通过工具读取你当前选中的文档正文或画布文本卡片，再从真实读者视角点评。
+              </p>
+
+              <button class="save-btn" @click="saveConfig">保存配置</button>
+            </template>
+
+            <!-- 章纲设置（自动界面「章纲生成」提示词，参考精修选项卡） -->
+            <template v-if="activeTab === 'chapter'">
+              <div class="prompt-header">
+                <label class="field-label" for="chapterOutlinePrompt">提示词</label>
+                <button class="restore-prompt-btn" title="恢复默认提示词" @click="restorePrompt('chapter')">
+                  <RotateCcw :size="13" :stroke-width="1.8" />
+                  恢复默认
+                </button>
+              </div>
+              <textarea
+                id="chapterOutlinePrompt"
+                v-model="aiSettings.chapterOutlinePrompt"
+                class="prompt-textarea"
+                rows="16"
+                placeholder="请输入章纲生成的提示词（留空则使用默认）..."
+              ></textarea>
+              <p class="field-hint">
+                这份提示词同时交给「自动」界面右侧面板的「章纲生成」按钮使用。清空并填入你自己的提示词即可立即生效；点击「恢复默认」可还原为内置章节细纲格式。
               </p>
 
               <button class="save-btn" @click="saveConfig">保存配置</button>

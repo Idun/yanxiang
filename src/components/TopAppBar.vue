@@ -11,7 +11,7 @@ import {
   Settings,
 } from "lucide-vue-next";
 
-export type TopTab = "home" | "docs" | "library" | "refine" | "insight";
+export type TopTab = "home" | "docs" | "library" | "auto" | "refine" | "insight";
 
 defineProps<{
   active: TopTab;
@@ -150,6 +150,13 @@ onBeforeUnmount(() => {
         </button>
         <button
           class="nav-link"
+          :class="{ active: active === 'auto' }"
+          @click="emit('select', 'auto')"
+        >
+          自动
+        </button>
+        <button
+          class="nav-link"
           :class="{ active: active === 'refine' }"
           @click="emit('select', 'refine')"
         >
@@ -169,7 +176,7 @@ onBeforeUnmount(() => {
 
       <div class="topbar-right">
         <button
-          v-if="active !== 'refine' && active !== 'home'"
+          v-if="active !== 'refine' && active !== 'home' && active !== 'auto'"
           class="icon-btn"
           title="折叠/展开右侧"
           @click="emit('toggleSidebar')"

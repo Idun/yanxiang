@@ -311,6 +311,27 @@ export function runKnowledgeTool(
   }
 }
 
+/**
+ * Heuristic: does this API error mean "this model/relay has no tool support"?
+ * Mirrors the local copy in ChatSidebar.vue so other panels (Auto) can reuse it.
+ */
+export function isToolUnsupportedError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (!/\b(400|404|422)\b/.test(msg)) return false;
+  return /tool|function[_ ]?call/.test(msg);
+}
+
+/**
+ * Legacy path: paste knowledge content straight into the system prompt, used
+ * when the model/relay rejects the `tools` field outright.
+ */
+export function inlineKnowledgeFallback(scope: KnowledgeScope): string {
+  const files = knowledgeList(scope);
+  if (files.length === 0) return "";
+  const ctx = files.map((k) => `[知识文件: ${k.name}]\n${k.content}`).join("\n\n---\n\n");
+  return `【内置知识库资料 (当前模型不支持工具调用，已直接携带)】:\n${ctx}`;
+}
+
 /** Human-readable one-liner for the "agent is reading…" UI badge. */
 export function describeKnowledgeToolCall(name: string, args: Record<string, unknown>): string {
   if (name === "list_knowledge") return "浏览知识项目录";

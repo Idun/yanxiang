@@ -6,6 +6,7 @@ import { docStore } from "./docStore";
 import { libraryStore } from "./libraryStore";
 import { aiSettings, clampAutoSaveMinutes } from "./settings";
 import AiSettingsPanel from "./components/AiSettingsPanel.vue";
+import AutoView from "./components/AutoView.vue";
 import ChatSidebar from "./components/ChatSidebar.vue";
 import DocumentViewer from "./components/DocumentViewer.vue";
 import HomeView from "./components/HomeView.vue";
@@ -26,6 +27,11 @@ import { showToast } from "./insightStore";
 /* 启动落在主页：先看到最近文档与写作进度，再决定进入哪个工作区。 */
 const activeTab = ref<TopTab>("home");
 const settingsOpen = ref(false);
+/** 自动界面实例句柄：Ctrl+S / 保存按钮在自动界面时路由到「保存鼠标所在文稿」。 */
+const autoViewRef = ref<InstanceType<typeof AutoView> | null>(null);
+/* 自动界面存稿：用与文档界面同一套「同步到本地文件 / 另存为」面板承载。 */
+const saveDrivenByAuto = ref(false);
+const pendingAutoSaveContent = ref("");
 
 /* Right-panel open state, decoupled independently for every tab.
    The writing (library) view defaults to expanded; other views are collapsed.
@@ -34,6 +40,7 @@ const sidebarStates = reactive<Record<TopTab, boolean>>({
   home: false,
   docs: false,
   library: true,
+  auto: false,
   refine: false,
   insight: false,
 });
@@ -208,6 +215,7 @@ function boundFileName(handle: WritableHandle | undefined): string {
     1. 已关联/导入过本地文件：弹出项目样式的「保存更改」确认弹窗（包含【保存更改】和【取消】按钮）；
     2. 未关联本地文件：弹出项目样式的「同步到本地文件」引导弹窗（引导另存为建立关联）。 */
 async function saveFlow() {
+  saveDrivenByAuto.value = false;
   const active = activeDocFile();
   const handle = active ? fileHandles.get(active.id) : undefined;
 
@@ -220,6 +228,24 @@ async function saveFlow() {
 
 /** Ctrl+Shift+S — always ask for a destination path. */
 async function saveFileAs() {
+  /* 自动界面文稿：保存面板驱动，直接把「当前文稿」另存为本地文件。 */
+  if (saveDrivenByAuto.value && pendingAutoSaveContent.value) {
+    const content = pendingAutoSaveContent.value;
+    const suggested = saveFileName.value || "AI 文稿.md";
+    saveDrivenByAuto.value = false;
+    pendingAutoSaveContent.value = "";
+    const result = await downloadTextFileWithDialog(
+      suggested,
+      content,
+      "text/markdown;charset=utf-8",
+      TEXT_PICKER_TYPES,
+    );
+    if (result.saved) {
+      showToast("已保存到本地", result.handle?.name ?? suggested, "habit");
+    }
+    return;
+  }
+
   const active = activeDocFile();
   const suggested = withMarkdownExtension(currentFileName());
   const content = docStore.markdown;
@@ -317,17 +343,25 @@ const saveCharCount = ref(0);
 const savePrimaryRef = ref<HTMLButtonElement | null>(null);
 
 function openSaveDialog() {
-  saveFileName.value = currentFileName();
-  saveCharCount.value = docStore.markdown.length;
+  openSaveDialogWith(currentFileName(), docStore.markdown.length);
+}
+
+/** 打开「同步到本地文件」保存面板（文档与自动界面共用同一套面板）。 */
+function openSaveDialogWith(fileName: string, charCount: number) {
+  saveFileName.value = fileName;
+  saveCharCount.value = charCount;
   saveDialogOpen.value = true;
   nextTick(() => savePrimaryRef.value?.focus());
 }
 
 function closeSaveDialog() {
   saveDialogOpen.value = false;
+  saveDrivenByAuto.value = false;
+  pendingAutoSaveContent.value = "";
 }
 
-/** Ctrl+S 目标动作二：未关联本地文件的文档，就地另存为并建立关联。 */
+/** Ctrl+S 目标动作二：未关联本地文件的文档，就地另存为并建立关联；
+    自动界面文稿走同一面板同一入口。 */
 function saveFileAsFromDialog() {
   saveDialogOpen.value = false;
   void saveFileAs();
@@ -400,6 +434,44 @@ watch(
 
 /* ---------------- Global shortcuts ---------------- */
 
+/** 自动界面与文档界面的「保存」落点区分：统一走同一套保存面板。
+    自动界面保存的是「鼠标所在文稿」；文档界面沿用原有保存流程。 */
+function beginAutoSave() {
+  const m = autoViewRef.value?.getActiveManuscript();
+  if (!m || !m.content.trim()) {
+    showToast("提示", "暂无可保存的文稿", "edit");
+    return;
+  }
+  saveDrivenByAuto.value = true;
+  pendingAutoSaveContent.value = m.content;
+  openSaveDialogWith(withMarkdownExtension(m.title || "AI 文稿"), m.content.length);
+}
+
+/** 自动界面的「另存为」：不走面板直接弹系统另存为，落点仍是当前文稿。 */
+function onSaveFileAsClick() {
+  if (activeTab.value === "auto") {
+    const m = autoViewRef.value?.getActiveManuscript();
+    if (!m || !m.content.trim()) {
+      showToast("提示", "暂无可保存的文稿", "edit");
+      return;
+    }
+    saveDrivenByAuto.value = true;
+    pendingAutoSaveContent.value = m.content;
+    saveFileName.value = withMarkdownExtension(m.title || "AI 文稿");
+    void saveFileAs();
+    return;
+  }
+  void saveFileAs();
+}
+
+function onSaveFileClick() {
+  if (activeTab.value === "auto") {
+    beginAutoSave();
+    return;
+  }
+  void saveFlow();
+}
+
 function onGlobalKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     if (overwriteDialogOpen.value) {
@@ -423,11 +495,15 @@ function onGlobalKeydown(event: KeyboardEvent) {
 
   if (key === "s") {
     /* 捕获阶段掐断浏览器 / WebView 的「保存网页」默认行为。
-       Ctrl+S = 同步到本地文件（已关联则静默覆盖，未关联则引导另存）；Shift+S = 总是另存。 */
+       Ctrl+S = 弹出统一保存面板（自动界面存当前文稿，文档界面同步文档到本地文件）；
+       Shift+S = 总是另存为对应文稿 / 文档。 */
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (event.shiftKey) void saveFileAs();
-    else void saveFlow();
+    if (event.shiftKey) {
+      onSaveFileAsClick();
+    } else {
+      onSaveFileClick();
+    }
     return;
   }
   if (key === "o" && !event.shiftKey) {
@@ -458,8 +534,8 @@ onBeforeUnmount(() => {
         @select="onSelectTab"
         @openSettings="settingsOpen = true"
         @importFile="importFile"
-        @saveFile="saveFlow"
-        @saveFileAs="saveFileAs"
+        @saveFile="onSaveFileClick"
+        @saveFileAs="onSaveFileAsClick"
         @backupData="backupData"
         @toggleSplit="toggleSplit"
       />
@@ -501,6 +577,7 @@ onBeforeUnmount(() => {
             :sidebar-open="sidebarStates.library"
             @requestSidebar="(open: boolean) => (sidebarStates.library = open)"
           />
+          <AutoView v-show="activeTab === 'auto'" ref="autoViewRef" />
           <RefineView v-show="activeTab === 'refine'" />
           <InsightView v-show="activeTab === 'insight'" />
         </main>

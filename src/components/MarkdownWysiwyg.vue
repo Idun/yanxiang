@@ -484,6 +484,14 @@ export function liveHtmlToMarkdown(root: HTMLElement): string {
   return parts.join("\n").trimEnd();
 }
 
+/** 单节点序列化后的 Markdown 文本（文本节点取原文；元素节点按行内规则递归）。
+    供上层把「DOM 选区位置」换算成 markdown 字符串偏移时逐节点计量。 */
+export function liveNodeToMarkdown(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent || "";
+  if (node.nodeType === Node.ELEMENT_NODE) return serializeInlineNode(node as HTMLElement);
+  return "";
+}
+
 /** 取一个节点「所见即所得当前状态」的 Markdown 文本（含语法字符，跳过装饰符号）。 */
 export function liveNodeRawText(node: Node): string {
   let out = "";
@@ -672,6 +680,7 @@ import { documentFilesStore } from "../documentFilesStore";
 import ReadingProgressRing from "./ReadingProgressRing.vue";
 import { RING_SIZE_MAX } from "../readingRingStore";
 import { showToast } from "../insightStore";
+import DocReadingRails from "./DocReadingRails.vue";
 import {
   docBlockDrag,
   startBlockDrag,
@@ -1012,7 +1021,11 @@ function docSelectionOffsets(): { start: number; end: number } {
     let acc = 0;
     for (const b of blocks) {
       if (b.contains(container)) return acc + rawOffsetAt(b, container, offset);
-      acc += liveNodeRawText(b).length + 1;
+      /* 每个块对应 markdown 里一行；长度必须按「反编译出的 markdown 行」统计，
+         而不是当前可见原始文本 —— 表格 / 代码围栏会被折叠进单个块，若用原始文本
+         长度统计，表单元 / 围栏行后面的所有段落偏移都会整体错位（复制/剪切会
+         拿到其它段落的内容）。 */
+      acc += serializeLiveBlock(b).length + 1;
     }
     return acc;
   };
@@ -1042,7 +1055,10 @@ function placeDocOffsets(start: number, end: number) {
   const resolve = (offset: number): { block: HTMLElement; node: Node | null; inner: number } => {
     let acc = 0;
     for (const b of blocks) {
-      const len = liveNodeRawText(b).length;
+      /* 与 docSelectionOffsets 保持同一套统计：按「反编译出的 markdown 行」长度，
+         而不是块内原始可见文本 —— 表格 / 代码围栏折叠进单个块后原始文本会偏短，
+         否则还原光标 / 选区会整体错位。 */
+      const len = serializeLiveBlock(b).length;
       if (offset <= acc + len) return { block: b, ...locateNodeByRaw(b, offset - acc) };
       acc += len + 1;
     }
@@ -2461,12 +2477,164 @@ function applyMarkdownEdit(next: string, selStart: number, selEnd: number) {
   updateFocusState();
 }
 
+/** 返回包含某节点的顶层块；不在任何块内（如编辑器自身）返回 null。 */
+function closestTopBlock(node: Node | null): HTMLElement | null {
+  let n: Node | null = node;
+  while (n) {
+    if (
+      n.nodeType === Node.ELEMENT_NODE &&
+      (n as HTMLElement).classList.contains("md-block")
+    ) {
+      return n as HTMLElement;
+    }
+    n = n.parentNode;
+  }
+  return null;
+}
+
+/** 当前编辑区内可用的非空选区：优先实时选区，实时被折叠时退回已保存的快照。 */
+function editorSelectionRange(): Range | null {
+  const editor = editorRef.value;
+  if (!editor) return null;
+  const sel = window.getSelection();
+  const live = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+  if (live && !live.collapsed && editor.contains(live.commonAncestorContainer)) {
+    return live.cloneRange();
+  }
+  if (
+    savedSelectionRange &&
+    !savedSelectionRange.collapsed &&
+    editor.contains(savedSelectionRange.commonAncestorContainer)
+  ) {
+    return savedSelectionRange.cloneRange();
+  }
+  return null;
+}
+
+/** 块内任意子片段 → markdown 行内文本；整个块都被选中时走整块序列化。 */
+function serializeBlockSlice(block: HTMLElement, range: Range): string {
+  const startAtZero =
+    rawOffsetAt(block, range.startContainer, range.startOffset) <= 0;
+  const endAtFull =
+    rawOffsetAt(block, range.endContainer, range.endOffset) >= liveNodeRawText(block).length;
+  if (startAtZero && endAtFull) return serializeLiveBlock(block);
+  return serializeInlineChildren(range.cloneContents() as unknown as HTMLElement);
+}
+
+/** 从块首到 (node, offset) 的 markdown 片段（整块覆盖时走整块序列化）。 */
+function serializeBlockPrefix(block: HTMLElement, node: Node, offset: number): string {
+  if (rawOffsetAt(block, node, offset) >= liveNodeRawText(block).length) {
+    return serializeLiveBlock(block);
+  }
+  const r = document.createRange();
+  r.selectNodeContents(block);
+  try {
+    r.setEnd(node, offset);
+  } catch {
+    return serializeLiveBlock(block);
+  }
+  return serializeInlineChildren(r.cloneContents() as unknown as HTMLElement);
+}
+
+/** 从 (node, offset) 到块尾的 markdown 片段（整块覆盖时走整块序列化）。 */
+function serializeBlockSuffix(block: HTMLElement, node: Node, offset: number): string {
+  if (rawOffsetAt(block, node, offset) <= 0) {
+    return serializeLiveBlock(block);
+  }
+  const r = document.createRange();
+  r.selectNodeContents(block);
+  try {
+    r.setStart(node, offset);
+  } catch {
+    return serializeLiveBlock(block);
+  }
+  return serializeInlineChildren(r.cloneContents() as unknown as HTMLElement);
+}
+
+/**
+ * 把一个 DOM 选区序列化为 markdown 文本（块感知）。
+ *
+ * 关键改动：不再用「DOM 选区 → markdown 偏移 → modelValue.slice」的间接路径。
+ * 那条路径在表格 / 代码围栏等「多行折叠进单个块」的场景会整体错位，导致复制 /
+ * 剪切拿到其它段落的内容；这里直接从选区的 DOM 片段重建文本，稳定对齐用户
+ * 真正选中的内容。
+ */
+function serializeRangeToMarkdown(range: Range): string {
+  const editor = editorRef.value;
+  if (!editor) return "";
+  const startBlock =
+    range.startContainer === editor ? null : closestTopBlock(range.startContainer);
+  const endBlock =
+    range.endContainer === editor ? null : closestTopBlock(range.endContainer);
+  const blocks = Array.from(editor.querySelectorAll(":scope > .md-block")) as HTMLElement[];
+  const startIdx = startBlock ? blocks.indexOf(startBlock) : -1;
+  const endIdx = endBlock ? blocks.indexOf(endBlock) : blocks.length;
+  if ((startBlock && startIdx === -1) || (endBlock && endIdx === -1)) return "";
+  if (startBlock && endBlock && startBlock === endBlock) {
+    return serializeBlockSlice(startBlock, range);
+  }
+
+  const parts: string[] = [];
+  /* 首尾边界块可能产生空片段（跨块选区的前/后残片），直接跳过；
+     中间的块即使序列化为空（空行块）也必须保留，位置号换行在 join 时自然补齐。 */
+  const head =
+    startBlock && startBlock !== (endBlock as HTMLElement)
+      ? serializeBlockSuffix(startBlock, range.startContainer, range.startOffset)
+      : "";
+  if (head) parts.push(head);
+  for (let i = startIdx + 1; i < endIdx; i++) {
+    parts.push(serializeLiveBlock(blocks[i]));
+  }
+  if (endBlock && endBlock !== (startBlock as HTMLElement)) {
+    const tail = serializeBlockPrefix(endBlock, range.endContainer, range.endOffset);
+    if (tail) parts.push(tail);
+  }
+  return parts.join("\n");
+}
+
+/** 编辑区开头到 (node, offset) 对应的 markdown 字符数（供删除后定位光标）。 */
+function prefixMdLength(node: Node, offset: number): number {
+  const editor = editorRef.value;
+  if (!editor) return 0;
+  const r = document.createRange();
+  r.selectNodeContents(editor);
+  try {
+    r.setEnd(node, offset);
+  } catch {
+    return 0;
+  }
+  return serializeRangeToMarkdown(r).length;
+}
+
+/** 删除编辑区内选区并重渲染，光标停在删除起点。 */
+function deleteRangeByDom(range: Range, caret: number): boolean {
+  const editor = editorRef.value;
+  if (!editor) return false;
+  try {
+    range.deleteContents();
+  } catch {
+    return false;
+  }
+  /* 整篇被删空时编辑器可能一个块都不剩，先补一块空行占位再提交。 */
+  if (editor.querySelectorAll(":scope > .md-block").length === 0) {
+    editor.innerHTML = compileLiveHtml("");
+    emit("update:modelValue", "");
+    applyFindHighlight();
+    placeDocOffsets(caret, caret);
+    editor.focus();
+    updateFocusState();
+    return true;
+  }
+  const next = liveHtmlToMarkdown(editor);
+  applyMarkdownEdit(next, caret, caret);
+  return true;
+}
+
 /** 复制选中文字（markdown 原文，含 ** 等语法，与 textarea 复制行为一致）。 */
 async function copySelection(): Promise<boolean> {
-  const off = selectionOffsets();
-  if (!off) return false;
-  const md = props.modelValue;
-  const text = md.slice(off.start, off.end);
+  const range = editorSelectionRange();
+  if (!range) return false;
+  const text = serializeRangeToMarkdown(range);
   if (!text) return false;
   try {
     await navigator.clipboard.writeText(text);
@@ -2476,20 +2644,19 @@ async function copySelection(): Promise<boolean> {
   return true;
 }
 
-/** 剪切：复制 + 删除选中区间。 */
+/** 剪切：复制选中的 markdown 片段，再从 DOM 直接删除选中区间。 */
 async function cutSelection(): Promise<boolean> {
-  const off = selectionOffsets();
-  if (!off) return false;
-  const md = props.modelValue;
-  const text = md.slice(off.start, off.end);
+  const range = editorSelectionRange();
+  if (!range) return false;
+  const text = serializeRangeToMarkdown(range);
   if (!text) return false;
+  const caret = prefixMdLength(range.startContainer, range.startOffset);
   try {
     await navigator.clipboard.writeText(text);
   } catch {
     /* ignore */
   }
-  applyMarkdownEdit(md.slice(0, off.start) + md.slice(off.end), off.start, off.start);
-  return true;
+  return deleteRangeByDom(range, caret);
 }
 
 /** 粘贴：把剪贴板文本插到选中处（无选区则插光标处）。 */
@@ -2510,13 +2677,12 @@ async function pasteSelection(): Promise<boolean> {
   return true;
 }
 
-/** 删除选中区间。 */
+/** 删除选中区间（同样直接删除 DOM 选区，免受偏移错位影响）。 */
 function deleteSelection(): boolean {
-  const off = selectionOffsets();
-  if (!off) return false;
-  const md = props.modelValue;
-  applyMarkdownEdit(md.slice(0, off.start) + md.slice(off.end), off.start, off.start);
-  return true;
+  const range = editorSelectionRange();
+  if (!range) return false;
+  const caret = prefixMdLength(range.startContainer, range.startOffset);
+  return deleteRangeByDom(range, caret);
 }
 
 /** 全选整篇。 */
@@ -2658,6 +2824,15 @@ defineExpose({
         ></div>
       </div>
     </div>
+
+    <!-- 文档界面 WYSIWYG 阅读辅助侧栏：左=人物星图，右=地点 + 细纲轴（含伏笔/收回点）。
+         仅文档界面（持有 fileId）且在非禅定模式时展示，画布卡片等嵌入式场景不参与。 -->
+    <DocReadingRails
+      v-if="props.fileId && props.zenMode === 'off'"
+      :content="props.modelValue"
+      :file-id="props.fileId"
+      :margin-x="props.marginX"
+    />
 
     <!-- 全局拖拽跟随贴片 -->
     <Teleport to="body">

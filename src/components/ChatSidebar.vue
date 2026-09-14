@@ -8,7 +8,7 @@ import { commitDocEditorDrop, docEditorDrag } from "../docEditorDrop";
 import { cardAttachments, removeCardAttachment, fileAttachments, addFileAttachment, removeFileAttachment } from "../attachments";
 import { downloadTextFileWithDialog } from "../download";
 import { docStore } from "../docStore";
-import { documentFilesStore } from "../documentFilesStore";
+import { activeDocFile, documentFilesStore } from "../documentFilesStore";
 import { pulseAiDocEdit } from "../aiDocActivity";
 import { showToast } from "../insightStore";
 import { WRITER_AGENT_NAME, WRITER_AGENT_PROMPT } from "../prompts/writerAgent";
@@ -144,7 +144,7 @@ defineEmits<{
 }>();
 
 const props = defineProps<{
-  activeMainTab?: "home" | "docs" | "library" | "refine" | "insight";
+  activeMainTab?: "home" | "docs" | "library" | "auto" | "refine" | "insight";
 }>();
 
 export type SidebarTab = "chat" | "writer" | "auditor" | "reader";
@@ -1476,8 +1476,18 @@ function deleteUserMessage(message: ChatMessage) {
 
 function applyToCard(message: ChatMessage) {
   if (props.activeMainTab === "docs") {
-    const separator = docStore.markdown ? "\n\n" : "";
-    docStore.markdown += separator + message.content;
+    /* 应用到文档必须以文档树的 file.content 为准（文档界面监听它刷进编辑区），
+       只改 docStore.markdown 不会真正落到编辑区。 */
+    const body = message.content;
+    const file = activeDocFile();
+    if (file) {
+      const separator = file.content ? "\n\n" : "";
+      file.content += separator + body;
+      docStore.markdown = file.content;
+    } else {
+      const separator = docStore.markdown ? "\n\n" : "";
+      docStore.markdown += separator + body;
+    }
     /* 让左侧文档面板对应条目亮一下：一次性写入没有过程可跟，点亮固定时长即可。 */
     pulseAiDocEdit(documentFilesStore.activeFileId);
     showToast("已应用到文档", "AI 回复内容已插入到文档编辑区", "habit");
