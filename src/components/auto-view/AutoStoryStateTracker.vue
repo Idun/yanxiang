@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   AlertCircle,
   Bookmark,
   Clock,
   Compass,
   MapPin,
-  Move,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -17,6 +16,7 @@ import {
   Users,
   X,
 } from "lucide-vue-next";
+import { startLongPressDrag } from "../../longPressDrag";
 import { storyStateStore } from "./storyStateStore";
 
 const props = defineProps<{
@@ -100,8 +100,9 @@ const extractFeedback = ref("");
 
 function handleAutoExtract() {
   if (!props.currentDocContent || props.currentDocContent.trim().length < 30) {
-    extractFeedback.value = "当前正文内容较少，暂无可提取的剧情状态";
-    setTimeout(() => (extractFeedback.value = ""), 3000);
+    extractFeedback.value =
+      "暂无可同步的剧情正文(审核意见、读者评估报告、大纲、细纲、话本等不作为提取来源)";
+    setTimeout(() => (extractFeedback.value = ""), 3200);
     return;
   }
   isExtracting.value = true;
@@ -119,6 +120,80 @@ function handleAutoExtract() {
 const activeForeshadowCount = computed(() =>
   storyStateStore.ledger.foreshadowing.filter((f) => f.status !== "resolved").length
 );
+
+// 标签栏长按左右拖拽平移(窄面板下防止「场景局势 / 要点备忘」被挤出视野找不到)
+const tabsBarRef = ref<HTMLElement | null>(null);
+const isTabsBarDragging = ref(false);
+const tabsBarCanScrollRight = ref(false);
+
+function syncTabsBarOverflow() {
+  const el = tabsBarRef.value;
+  if (!el) {
+    tabsBarCanScrollRight.value = false;
+    return;
+  }
+  tabsBarCanScrollRight.value =
+    el.scrollWidth - el.scrollLeft - el.clientWidth > 2;
+}
+
+function handleTabsBarScroll() {
+  syncTabsBarOverflow();
+}
+
+function handleTabsBarDragStart(event: MouseEvent) {
+  const el = tabsBarRef.value;
+  if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+
+  const startLeft = el.scrollLeft;
+  const startX = event.clientX;
+  /* 长按静置 200ms 才武装拖拽,轻点仍是正常切换标签(见 longPressDrag)。 */
+  startLongPressDrag({
+    event,
+    ghostLabel: "左右拖拽切换标签",
+    ghostVariant: "row",
+    onStart: () => {
+      isTabsBarDragging.value = true;
+      syncTabsBarOverflow();
+    },
+    onMove: (x) => {
+      el.scrollLeft = startLeft - (x - startX);
+    },
+    onEnd: () => {
+      isTabsBarDragging.value = false;
+    },
+  });
+}
+
+function handleTabsBarWheel(e: WheelEvent) {
+  const el = tabsBarRef.value;
+  if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+  const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+  if (Math.abs(delta) > 0) {
+    el.scrollLeft += delta;
+  }
+}
+
+let tabsBarResizeObserver: ResizeObserver | null = null;
+
+onMounted(() => {
+  syncTabsBarOverflow();
+  const el = tabsBarRef.value;
+  if (el && typeof ResizeObserver !== "undefined") {
+    tabsBarResizeObserver = new ResizeObserver(syncTabsBarOverflow);
+    tabsBarResizeObserver.observe(el);
+    /* 标签数量变化会改变 scrollWidth 而不改变标签栏自身尺寸,同样需要重算。 */
+    tabsBarResizeObserver.observe(el.firstElementChild ?? el);
+  }
+});
+
+onBeforeUnmount(() => {
+  tabsBarResizeObserver?.disconnect();
+  tabsBarResizeObserver = null;
+});
+
+watch(activeTab, () => {
+  requestAnimationFrame(syncTabsBarOverflow);
+});
 
 // 左右拖拽平移表单项与卡片逻辑
 const isTabContentDragging = ref(false);
@@ -206,8 +281,16 @@ function handleDragScrollMouseDown(e: MouseEvent) {
       {{ extractFeedback }}
     </div>
 
-    <!-- 标签页导航 -->
-    <div class="tracker-tabs-bar">
+    <!-- 标签页导航(窄面板可长按左右拖拽平移,避免末尾标签被挤出视野) -->
+    <div class="tracker-tabs-wrap">
+      <div
+        ref="tabsBarRef"
+        class="tracker-tabs-bar"
+        :class="{ 'is-dragging': isTabsBarDragging, 'can-scroll-right': tabsBarCanScrollRight }"
+        @mousedown="handleTabsBarDragStart"
+        @wheel="handleTabsBarWheel"
+        @scroll="handleTabsBarScroll"
+      >
       <button
         type="button"
         class="tracker-tab-btn"
@@ -253,6 +336,7 @@ function handleDragScrollMouseDown(e: MouseEvent) {
           {{ (storyStateStore.ledger.keyPoints?.length || 0) + (storyStateStore.ledger.context.worldRules?.length || 0) }}
         </span>
       </button>
+      </div>
     </div>
 
     <!-- 标签页内容区 -->
@@ -262,10 +346,6 @@ function handleDragScrollMouseDown(e: MouseEvent) {
         <div class="section-title-bar">
           <span class="section-title">核心人物、当前等级/境界与持有道具</span>
           <div class="title-right-actions">
-            <span class="drag-scroll-hint" title="按住鼠标左右拖拽可平移查看完整内容">
-              <Move :size="11" />
-              <span>左右拖拽</span>
-            </span>
             <button
               v-if="!showAddChar"
               type="button"
@@ -278,6 +358,82 @@ function handleDragScrollMouseDown(e: MouseEvent) {
           </div>
         </div>
 
+        <!-- 添加角色表单 -->
+        <div v-if="showAddChar" class="tracker-card add-form-card">
+          <div class="form-title-bar">
+            <span class="form-title">添加新角色</span>
+            <button type="button" class="form-close-btn" @click="showAddChar = false">
+              <X :size="14" />
+            </button>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">角色姓名</label>
+              <input
+                v-model="newCharName"
+                type="text"
+                placeholder="例如：林萧"
+                class="form-input"
+              />
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">角色定位</label>
+              <select v-model="newCharRole" class="form-select">
+                <option value="主角">主角</option>
+                <option value="核心配角">核心配角</option>
+                <option value="反派敌手">反派敌手</option>
+                <option value="导师长辈">导师长辈</option>
+                <option value="中立过客">中立过客</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">当前等级/境界</label>
+              <input
+                v-model="newCharLevel"
+                type="text"
+                placeholder="例如：筑基中期 / 剑宗真传"
+                class="form-input"
+              />
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">当前状态</label>
+              <input
+                v-model="newCharStatus"
+                type="text"
+                placeholder="例如：健康 / 经脉微损"
+                class="form-input"
+              />
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">持有装备/法宝（逗号分隔）</label>
+            <input
+              v-model="newCharEquip"
+              type="text"
+              placeholder="例如：青钢剑, 灵兽袋, 破界符"
+              class="form-input"
+            />
+          </div>
+          <div class="form-actions">
+            <button
+              type="button"
+              class="tracker-btn tracker-btn-primary"
+              @click="handleAddChar"
+            >
+              保存角色
+            </button>
+            <button
+              type="button"
+              class="tracker-btn tracker-btn-outline"
+              @click="showAddChar = false"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+
         <div
           class="drag-scroll-zone"
           :class="{ 'is-dragging': isTabContentDragging }"
@@ -285,82 +441,6 @@ function handleDragScrollMouseDown(e: MouseEvent) {
           @wheel="handleWheelScroll"
         >
           <div class="drag-scroll-inner">
-            <!-- 添加角色表单 -->
-            <div v-if="showAddChar" class="tracker-card add-form-card">
-              <div class="form-title-bar">
-                <span class="form-title">添加新角色</span>
-                <button type="button" class="form-close-btn" @click="showAddChar = false">
-                  <X :size="14" />
-                </button>
-              </div>
-              <div class="form-row">
-                <div class="form-group flex-1">
-                  <label class="form-label">角色姓名</label>
-                  <input
-                    v-model="newCharName"
-                    type="text"
-                    placeholder="例如：林萧"
-                    class="form-input"
-                  />
-                </div>
-                <div class="form-group flex-1">
-                  <label class="form-label">角色定位</label>
-                  <select v-model="newCharRole" class="form-select">
-                    <option value="主角">主角</option>
-                    <option value="核心配角">核心配角</option>
-                    <option value="反派敌手">反派敌手</option>
-                    <option value="导师长辈">导师长辈</option>
-                    <option value="中立过客">中立过客</option>
-                  </select>
-                </div>
-              </div>
-              <div class="form-row">
-                <div class="form-group flex-1">
-                  <label class="form-label">当前等级/境界</label>
-                  <input
-                    v-model="newCharLevel"
-                    type="text"
-                    placeholder="例如：筑基中期 / 剑宗真传"
-                    class="form-input"
-                  />
-                </div>
-                <div class="form-group flex-1">
-                  <label class="form-label">当前状态</label>
-                  <input
-                    v-model="newCharStatus"
-                    type="text"
-                    placeholder="例如：健康 / 经脉微损"
-                    class="form-input"
-                  />
-                </div>
-              </div>
-              <div class="form-group">
-                <label class="form-label">持有装备/法宝（逗号分隔）</label>
-                <input
-                  v-model="newCharEquip"
-                  type="text"
-                  placeholder="例如：青钢剑, 灵兽袋, 破界符"
-                  class="form-input"
-                />
-              </div>
-              <div class="form-actions">
-                <button
-                  type="button"
-                  class="tracker-btn tracker-btn-primary"
-                  @click="handleAddChar"
-                >
-                  保存角色
-                </button>
-                <button
-                  type="button"
-                  class="tracker-btn tracker-btn-outline"
-                  @click="showAddChar = false"
-                >
-                  取消
-                </button>
-              </div>
-            </div>
-
             <!-- 角色列表卡片 -->
             <div class="items-list">
               <div
@@ -421,10 +501,6 @@ function handleDragScrollMouseDown(e: MouseEvent) {
         <div class="section-title-bar">
           <span class="section-title">伏笔暗线与回收追踪</span>
           <div class="title-right-actions">
-            <span class="drag-scroll-hint" title="按住鼠标左右拖拽可平移查看完整内容">
-              <Move :size="11" />
-              <span>左右拖拽</span>
-            </span>
             <button
               v-if="!showAddFore"
               type="button"
@@ -437,6 +513,59 @@ function handleDragScrollMouseDown(e: MouseEvent) {
           </div>
         </div>
 
+        <!-- 新增伏笔表单 -->
+        <div v-if="showAddFore" class="tracker-card add-form-card">
+          <div class="form-title-bar">
+            <span class="form-title">记录新伏笔</span>
+            <button type="button" class="form-close-btn" @click="showAddFore = false">
+              <X :size="14" />
+            </button>
+          </div>
+          <div class="form-group">
+            <label class="form-label">埋设章节/场景</label>
+            <input
+              v-model="newForeChapter"
+              type="text"
+              placeholder="例如：第1章 / 云雾谷"
+              class="form-input"
+            />
+          </div>
+          <div class="form-group">
+            <label class="form-label">伏笔内容与暗示细节</label>
+            <textarea
+              v-model="newForeContent"
+              rows="2"
+              placeholder="例如：玉佩在触碰古鼎时闪过一道蓝光"
+              class="form-textarea"
+            />
+          </div>
+          <div class="form-group">
+            <label class="form-label">预期推进或回收备忘</label>
+            <input
+              v-model="newForeNotes"
+              type="text"
+              placeholder="例如：预计第10章揭晓主角身世"
+              class="form-input"
+            />
+          </div>
+          <div class="form-actions">
+            <button
+              type="button"
+              class="tracker-btn tracker-btn-primary"
+              @click="handleAddFore"
+            >
+              保存伏笔
+            </button>
+            <button
+              type="button"
+              class="tracker-btn tracker-btn-outline"
+              @click="showAddFore = false"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+
         <div
           class="drag-scroll-zone"
           :class="{ 'is-dragging': isTabContentDragging }"
@@ -444,59 +573,6 @@ function handleDragScrollMouseDown(e: MouseEvent) {
           @wheel="handleWheelScroll"
         >
           <div class="drag-scroll-inner">
-            <!-- 新增伏笔表单 -->
-            <div v-if="showAddFore" class="tracker-card add-form-card">
-              <div class="form-title-bar">
-                <span class="form-title">记录新伏笔</span>
-                <button type="button" class="form-close-btn" @click="showAddFore = false">
-                  <X :size="14" />
-                </button>
-              </div>
-              <div class="form-group">
-                <label class="form-label">埋设章节/场景</label>
-                <input
-                  v-model="newForeChapter"
-                  type="text"
-                  placeholder="例如：第1章 / 云雾谷"
-                  class="form-input"
-                />
-              </div>
-              <div class="form-group">
-                <label class="form-label">伏笔内容与暗示细节</label>
-                <textarea
-                  v-model="newForeContent"
-                  rows="2"
-                  placeholder="例如：玉佩在触碰古鼎时闪过一道蓝光"
-                  class="form-textarea"
-                />
-              </div>
-              <div class="form-group">
-                <label class="form-label">预期推进或回收备忘</label>
-                <input
-                  v-model="newForeNotes"
-                  type="text"
-                  placeholder="例如：预计第10章揭晓主角身世"
-                  class="form-input"
-                />
-              </div>
-              <div class="form-actions">
-                <button
-                  type="button"
-                  class="tracker-btn tracker-btn-primary"
-                  @click="handleAddFore"
-                >
-                  保存伏笔
-                </button>
-                <button
-                  type="button"
-                  class="tracker-btn tracker-btn-outline"
-                  @click="showAddFore = false"
-                >
-                  取消
-                </button>
-              </div>
-            </div>
-
             <!-- 伏笔列表 -->
             <div class="items-list">
               <div
@@ -562,19 +638,10 @@ function handleDragScrollMouseDown(e: MouseEvent) {
       <section v-show="activeTab === 'context'" class="tab-pane">
         <div class="section-title-bar">
           <span class="section-title">当前时空场景与局势冲突</span>
-          <span class="drag-scroll-hint" title="按住鼠标左右拖拽可平移查看完整内容">
-            <Move :size="11" />
-            <span>左右拖拽</span>
-          </span>
         </div>
 
-        <div
-          class="drag-scroll-zone"
-          :class="{ 'is-dragging': isTabContentDragging }"
-          @mousedown="handleDragScrollMouseDown"
-          @wheel="handleWheelScroll"
-        >
-          <div class="drag-scroll-inner">
+        <div class="fit-zone">
+          <div class="drag-scroll-inner fit-width">
             <div class="tracker-card context-form-card">
               <div class="form-group">
                 <label class="form-label flex-inline-label">
@@ -623,19 +690,10 @@ function handleDragScrollMouseDown(e: MouseEvent) {
       <section v-show="activeTab === 'keypoints'" class="tab-pane">
         <div class="section-title-bar">
           <span class="section-title">世界观底线规则与约束要点</span>
-          <span class="drag-scroll-hint" title="按住鼠标左右拖拽可平移查看完整内容">
-            <Move :size="11" />
-            <span>左右拖拽</span>
-          </span>
         </div>
 
-        <div
-          class="drag-scroll-zone"
-          :class="{ 'is-dragging': isTabContentDragging }"
-          @mousedown="handleDragScrollMouseDown"
-          @wheel="handleWheelScroll"
-        >
-          <div class="drag-scroll-inner">
+        <div class="fit-zone">
+          <div class="drag-scroll-inner fit-width">
             <div class="add-inline-row">
               <input
                 v-model="newWorldRuleText"
@@ -797,16 +855,39 @@ function handleDragScrollMouseDown(e: MouseEvent) {
 }
 
 /* 标签页导航 (自适应平滑横向滚动与紧凑拉伸) */
+.tracker-tabs-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background-color: var(--surface-container-low, #f3f4f6);
+  border-bottom: 1px solid var(--outline-variant, #e5e7eb);
+  flex-shrink: 0;
+  padding-right: 4px;
+}
+
 .tracker-tabs-bar {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 2px;
   padding: 4px 5px;
-  background-color: var(--surface-container-low, #f3f4f6);
-  border-bottom: 1px solid var(--outline-variant, #e5e7eb);
-  flex-shrink: 0;
+  background-color: transparent;
   overflow-x: auto;
   scrollbar-width: none;
+  -ms-overflow-style: none;
+  cursor: grab;
+}
+
+.tracker-tabs-bar.is-dragging {
+  cursor: grabbing;
+}
+
+/* 仅当右侧仍有未显示的标签时才在右缘渐隐提示;滚到末尾则渐隐消失 */
+.tracker-tabs-bar.can-scroll-right {
+  mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent 100%);
 }
 
 .tracker-tabs-bar::-webkit-scrollbar {
@@ -893,21 +974,6 @@ function handleDragScrollMouseDown(e: MouseEvent) {
   gap: 6px;
 }
 
-.drag-scroll-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 0.65rem;
-  color: var(--primary, #2563eb);
-  background-color: rgba(var(--primary-rgb, 59 130 246) / 0.08);
-  border: 1px dashed rgba(var(--primary-rgb, 59 130 246) / 0.3);
-  padding: 1px 5px;
-  border-radius: 4px;
-  user-select: none;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
 .drag-scroll-zone {
   width: 100%;
   max-width: 100%;
@@ -947,10 +1013,31 @@ function handleDragScrollMouseDown(e: MouseEvent) {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-width: 380px;
+  min-width: 0;
   width: 100%;
   box-sizing: border-box;
+}
+
+/* 卡片列表(角色装备 / 伏笔线索)靠 380px 最小宽度触发横向拖拽平移,
+   而同一区域内的新增表单保持随面板宽度自适应 —— 表单不被这个最小宽度撑开。 */
+.items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 380px;
   flex-shrink: 0;
+}
+
+/* 场景局势 / 要点备忘:表单不做横向溢出平移,输入框随面板宽度自适应 */
+.fit-zone {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.fit-width {
+  min-width: 0;
+  width: 100%;
 }
 
 .section-title {
@@ -990,12 +1077,16 @@ function handleDragScrollMouseDown(e: MouseEvent) {
   box-sizing: border-box;
 }
 
+/* 新增表单卡片:随面板宽度自适应,窄面板时两列并排自动换成单列堆叠 */
 .add-form-card {
   background-color: var(--surface-container-low, #f9fafb);
   border: 1px solid rgba(var(--primary-rgb, 59 130 246) / 0.3);
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .form-title-bar {
@@ -1020,11 +1111,12 @@ function handleDragScrollMouseDown(e: MouseEvent) {
 
 .form-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .form-row > .form-group {
-  flex: 1;
+  flex: 1 1 130px;
   min-width: 0;
 }
 
@@ -1144,12 +1236,6 @@ function handleDragScrollMouseDown(e: MouseEvent) {
 }
 
 /* 列表卡片 */
-.items-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
 .item-card {
   display: flex;
   flex-direction: column;

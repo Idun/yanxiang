@@ -28,6 +28,18 @@ import { mapStore, PLACE_ICON_COLORS } from "../mapStore";
 import { hashText, getDocInsight } from "../docInsightStore";
 import { extractInsightsFromChapter, type InsightExtractResult } from "../docInsightAgent";
 import { showToast } from "../insightStore";
+import {
+  buildPayoffMap,
+  detectChapterInfo,
+  detectChapterNumber,
+  findDetailedOutlineFile,
+  isNonMainDocument,
+  parseVolumeOutline,
+  pickBestBlock,
+  splitChapters,
+  toSearchKey,
+  type OutlineChapter,
+} from "../docReadingInsights";
 
 const props = defineProps<{
   content: string;
@@ -36,29 +48,6 @@ const props = defineProps<{
 }>();
 
 /* ---------------- 1. 屏蔽非正文规划文档（大纲 / 细纲 / 设定等自身编辑时屏蔽侧轨） ---------------- */
-function isNonMainDocument(file?: { title?: string; content?: string; folderId?: string | null }): boolean {
-  if (!file) return false;
-  const title = (file.title || "").trim().toLowerCase();
-  const content = (file.content || "").slice(0, 1500).toLowerCase();
-
-  const titleKeywords = [
-    "大纲", "细纲", "卷纲", "章纲", "分章", "梗概", "设定", "人物", "世界观",
-    "地图", "灵感", "素材", "草稿", "前言", "目录", "总结", "卡片", "卷一",
-    "卷二", "卷三", "卷四", "卷五", "卷六", "卷七", "卷八", "卷九", "卷十",
-    "outline", "setting", "world", "character", "draft", "notes"
-  ];
-  if (titleKeywords.some((k) => title.includes(k))) return true;
-
-  if (
-    /^(?:#{1,3}\s*)?(?:卷纲|细纲|章纲|大纲|分章大纲|人物设定|世界观|场景规划|故事线索|伏笔汇总|资料库)/i.test(content) ||
-    /【(?:本节构成|细纲|场景规划|核心看点|伏笔|收回点|人物关系|角色列表)】/.test(content)
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
 const currentFile = computed(() =>
   props.fileId ? documentFilesStore.files.find((f) => f.id === props.fileId) : undefined,
 );
@@ -184,61 +173,7 @@ const rightRailWidth = computed(() => {
 const hasEnoughLeftSpace = computed(() => leftGutterPx.value >= 110);
 const hasEnoughRightSpace = computed(() => rightGutterPx.value >= 110);
 
-/* ---------------- 章节解析与数值转换 ---------------- */
-function parseChineseOrArabicNum(str: string): number | null {
-  if (!str) return null;
-  if (/^\d+$/.test(str)) return parseInt(str, 10);
-  const cnMap: Record<string, number> = {
-    零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
-    十: 10, 百: 100
-  };
-  if (str.length === 1 && cnMap[str] !== undefined) return cnMap[str];
-  let val = 0;
-  let temp = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str[i];
-    const n = cnMap[char];
-    if (n === undefined) continue;
-    if (n === 10) {
-      val += (temp || 1) * 10;
-      temp = 0;
-    } else if (n === 100) {
-      val += (temp || 1) * 100;
-      temp = 0;
-    } else {
-      temp = n;
-    }
-  }
-  val += temp;
-  return val >= 0 ? val : null;
-}
-
-function detectChapterInfo(text: string): { num: number; label: string; title: string } | null {
-  const cleaned = text.replace(/^[#\s—\-]+/, "").trim();
-  const match = /^(?:(序章|前言|楔子|引子|序言|序|尾声|后记|结语|附录|番外篇|番外|外传)|第\s*([0-9一二三四五六七八九十百零]+)\s*章|Chapter\s*(\d+))(?:[：:\s·—\-]+(.*))?$/i.exec(cleaned);
-  if (!match) return null;
-
-  if (match[1]) {
-    return { num: 0, label: match[1], title: match[4] || match[1] };
-  }
-
-  const numStr = match[2] || match[3];
-  const num = parseChineseOrArabicNum(numStr);
-  if (num === null) return null;
-
-  const label = `第${num}章`;
-  const title = match[4] || "";
-  return { num, label, title };
-}
-
-function detectChapterNumber(content: string): number | null {
-  if (!content) return null;
-  const match = /(?:^|\n)(?:#{1,6}\s+|——\s*)?(?:(序章|前言|楔子|引子|序言|序|尾声|后记|结语)|第\s*([0-9一二三四五六七八九十百零]+)\s*章|Chapter\s*(\d+))/i.exec(content);
-  if (!match) return null;
-  if (match[1]) return 0;
-  return parseChineseOrArabicNum(match[2] || match[3]);
-}
-
+/* ---------------- 章节解析（解析规则见 ../docReadingInsights.ts） ---------------- */
 const currentChapterNum = ref<number | null>(null);
 const chapterHeadEls = ref<{ num: number; label: string; title: string; el: HTMLElement }[]>([]);
 
@@ -379,30 +314,6 @@ watch(
 );
 
 /* ---------------- 章节内容切分 ---------------- */
-function splitChapters(content: string): Array<{ num: number; start: number; end: number }> {
-  if (!content) return [];
-  const slices: Array<{ num: number; start: number; end: number }> = [];
-  const regex = /(?:^|\n)(?:#{1,6}\s+|——\s*)?(?:序章|前言|楔子|引子|序言|序|尾声|后记|结语|第\s*[0-9一二三四五六七八九十百零]+\s*章|Chapter\s*\d+)(?:[：:\s·—\-]+[^\n]*)?/gi;
-
-  let match: RegExpExecArray | null;
-  const points: { num: number; index: number }[] = [];
-
-  while ((match = regex.exec(content)) !== null) {
-    const info = detectChapterInfo(match[0].trim());
-    if (info !== null) {
-      points.push({ num: info.num, index: match.index });
-    }
-  }
-
-  for (let i = 0; i < points.length; i++) {
-    const start = points[i].index;
-    const end = i + 1 < points.length ? points[i + 1].index : content.length;
-    slices.push({ num: points[i].num, start, end });
-  }
-
-  return slices;
-}
-
 const chapterSlices = computed(() => splitChapters(props.content || ""));
 const currentChapterText = computed(() => {
   if (currentChapterNum.value === null) {
@@ -611,225 +522,7 @@ const displayPlaces = computed(() => {
   });
 });
 
-/* ---------------- 章节细纲轴解析（结构化情境、欲望、冲突、转变、结果与伏笔） ---------------- */
-interface OutlineSection {
-  label: string;
-  anchor: string;
-  situation?: string; // 情境
-  desire?: string;    // 欲望
-  conflict?: string;  // 冲突
-  turn?: string;      // 转变
-  result?: string;    // 结果
-}
-
-interface ForeshadowItem {
-  text: string;
-  targetChapter: number | null;
-  targetText?: string;
-}
-
-interface OutlineChapter {
-  num: number;
-  title: string;
-  sections: OutlineSection[];
-  foreshadows: ForeshadowItem[];
-}
-
-function matchDramaTag(line: string): { key: "situation" | "desire" | "conflict" | "turn" | "result"; val: string } | null {
-  const h = /^(?:[-*+\s]*)(?:[*_~`]|【)?(情境|背景|环境|起因|欲望|动机|目标|冲突|阻碍|矛盾|转变|转折|契机|变化|结果|后果|结局|悬念)(?:[*_~`]|】)?[:：\s]+(.*)/i.exec(line);
-  if (!h) return null;
-  const d = h[1].trim();
-  const val = h[2].replace(/^[*_~`]+|[*_~`]+$/g, "").trim();
-  if (["情境", "背景", "环境", "起因"].includes(d)) return { key: "situation", val };
-  if (["欲望", "动机", "目标"].includes(d)) return { key: "desire", val };
-  if (["冲突", "阻碍", "矛盾"].includes(d)) return { key: "conflict", val };
-  if (["转变", "转折", "契机", "变化"].includes(d)) return { key: "turn", val };
-  if (["结果", "后果", "结局", "悬念"].includes(d)) return { key: "result", val };
-  return null;
-}
-
-function parseForeshadowLine(line: string): ForeshadowItem {
-  const clean = line.replace(/^[-*+\d.\s]+/, "").trim();
-  const targetMatch = /(?:[-─→>|~～\s]*(?:收回点|目标收回|收回|回收|对应|埋设)?[：:\s]*第\s*(\d+)\s*章|\(第\s*(\d+)\s*章(?:收回|回收)?\)|\(第\s*(\d+)\s*章\)|（第\s*(\d+)\s*章(?:收回|回收)?）|（第\s*(\d+)\s*章）)/i.exec(clean);
-  let targetChapter: number | null = null;
-  let text = clean;
-  if (targetMatch) {
-    targetChapter = parseInt(targetMatch[1] || targetMatch[2] || targetMatch[3] || targetMatch[4] || targetMatch[5], 10);
-    text = clean.slice(0, targetMatch.index).trim();
-  }
-  text = text.replace(/^(?:(?:\*\*|【)?(?:伏笔记录|伏笔呈现|伏笔|线索)(?:\*\*|】)?[:：\s]*)/, "").replace(/[*_~`]/g, "").trim();
-  if (!text) text = clean;
-  return { text, targetChapter: isNaN(targetChapter as number) ? null : targetChapter };
-}
-
-function parseVolumeOutline(content: string): OutlineChapter[] {
-  if (!content || !content.trim()) return [];
-
-  const chapters: OutlineChapter[] = [];
-  const lines = content.split(/\r?\n/);
-
-  let curChapter: OutlineChapter | null = null;
-  let curSection: OutlineSection | null = null;
-  let inForeshadowBlock = false;
-  let sectionCounter = 1;
-
-  const commitSection = () => {
-    if (curChapter && curSection) {
-      if (
-        curSection.label ||
-        curSection.situation ||
-        curSection.desire ||
-        curSection.conflict ||
-        curSection.turn ||
-        curSection.result
-      ) {
-        if (!curSection.label) {
-          curSection.label = `场景 ${sectionCounter++}`;
-        }
-        curChapter.sections.push({ ...curSection });
-      }
-      curSection = null;
-    }
-  };
-
-  const commitChapter = () => {
-    commitSection();
-    if (curChapter) {
-      if (curChapter.sections.length > 0 || curChapter.foreshadows.length > 0 || curChapter.title.trim()) {
-        const existing = chapters.find((c) => c.num === curChapter!.num);
-        if (existing) {
-          existing.sections.push(...curChapter.sections);
-          existing.foreshadows.push(...curChapter.foreshadows);
-          if (!existing.title && curChapter.title) existing.title = curChapter.title;
-        } else {
-          chapters.push(curChapter);
-        }
-      }
-      curChapter = null;
-    }
-    sectionCounter = 1;
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const rawLine = lines[i];
-    const line = rawLine.trim();
-    if (!line) continue;
-
-    // 1. 章节标题识别
-    const chapInfo = detectChapterInfo(line);
-    if (chapInfo !== null) {
-      commitChapter();
-      curChapter = {
-        num: chapInfo.num,
-        title: chapInfo.title,
-        sections: [],
-        foreshadows: [],
-      };
-      inForeshadowBlock = false;
-      continue;
-    }
-
-    if (!curChapter) {
-      curChapter = { num: 0, title: "", sections: [], foreshadows: [] };
-    }
-
-    // 2. 伏笔块标识
-    if (/【\s*(?:伏笔|伏笔呈现|伏笔记录|伏笔埋设)\s*】/i.test(line)) {
-      commitSection();
-      inForeshadowBlock = true;
-      continue;
-    }
-    // 本节构成块标识
-    if (/【\s*(?:本节构成|细纲|场景|节构成|小节构成|场景规划)\s*】/i.test(line)) {
-      commitSection();
-      inForeshadowBlock = false;
-      continue;
-    }
-
-    // 3. 独立伏笔行识别
-    if (/^(?:[-*+\d.\s]+)?(?:\*\*|【)?(?:伏笔记录|伏笔呈现|伏笔|线索)(?:\*\*|】)?[:：]/.test(line)) {
-      commitSection();
-      const fb = parseForeshadowLine(line);
-      if (fb.text) curChapter.foreshadows.push(fb);
-      continue;
-    }
-
-    if (inForeshadowBlock) {
-      const fb = parseForeshadowLine(line);
-      if (fb.text) curChapter.foreshadows.push(fb);
-      continue;
-    }
-
-    // 4. 解析戏剧五要素（情境 / 欲望 / 冲突 / 转变 / 结果）
-    const dt = matchDramaTag(line);
-    if (dt) {
-      if (!curSection) {
-        curSection = { label: `场景 ${sectionCounter++}`, anchor: dt.val.slice(0, 16) };
-      }
-      curSection[dt.key] = dt.val;
-      continue;
-    }
-
-    // 5. 识别新小节/场景标题
-    const secHeadMatch = /^(?:[-*+\d.\s]+|#{1,6}\s*)?(?:场景|节|小节|分节|段落)[\s\d一二三四五六七八九十：:]*(.*)/i.exec(line);
-    if (secHeadMatch) {
-      commitSection();
-      const rawTitle = secHeadMatch[1].trim() || line.replace(/^[-*+\d.\s#]+/, "").trim();
-      const anchor = rawTitle.split(/[（(：:|]/)[0].trim() || rawTitle;
-      curSection = { label: rawTitle, anchor };
-      continue;
-    }
-
-    // 6. 普通列表项
-    if (/^[-*+]\s+/.test(line) || /^\d+[.、]\s*/.test(line)) {
-      commitSection();
-      const text = line.replace(/^[-*+\d.、\s]+/, "").trim();
-      curSection = {
-        label: text.split(/[（(：:|]/)[0].trim() || text.slice(0, 16),
-        anchor: text.slice(0, 15),
-      };
-    }
-  }
-
-  commitChapter();
-  return chapters;
-}
-
-/* ---------------- 6. 严格只在“细纲”文档中抽取细纲，避免匹配大纲 ---------------- */
-function isDetailedOutlineDocument(file?: { title?: string; content?: string }): boolean {
-  if (!file) return false;
-  const title = (file.title || "").trim();
-  const content = (file.content || "").slice(0, 2000);
-
-  const isExplicitDetailedTitle = /细纲|章纲|分章细纲|场景规划/i.test(title);
-  const isPureGeneralOutlineTitle = /(?:总大纲|主线大纲|剧情大纲|大纲|分卷大纲)(?!.*细纲)/i.test(title);
-
-  if (isExplicitDetailedTitle) return true;
-  if (isPureGeneralOutlineTitle) return false;
-
-  if (/【\s*(?:本节构成|细纲|场景规划|分节细纲|节构成)\s*】/i.test(content)) {
-    return true;
-  }
-
-  return false;
-}
-
-function findDetailedOutlineFile(files: any[], currentFileId: string | null): any | undefined {
-  if (!files || files.length === 0) return undefined;
-  const current = files.find((f) => f.id === currentFileId);
-
-  // 1. 优先同文件夹下的细纲文档
-  if (current && current.folderId) {
-    const sameFolderOutline = files.find(
-      (f) => f.folderId === current.folderId && isDetailedOutlineDocument(f)
-    );
-    if (sameFolderOutline) return sameFolderOutline;
-  }
-
-  // 2. 检索所有文件中的细纲
-  return files.find((f) => isDetailedOutlineDocument(f));
-}
-
+/* ---------------- 章节细纲轴：解析规则集中在 ../docReadingInsights.ts ---------------- */
 const volumeFile = computed(() =>
   findDetailedOutlineFile(documentFilesStore.files, props.fileId ?? null),
 );
@@ -849,49 +542,62 @@ const currentOutlineChapter = computed<OutlineChapter | undefined>(() => {
 });
 
 /* ---------------- 7. 伏笔回收点计算 ---------------- */
-const payoffMap = computed(() => {
-  const m = new Map<number, { count: number; items: { text: string; from: string }[] }>();
-  for (const ch of volumeOutline.value) {
-    for (const fb of ch.foreshadows) {
-      if (fb.targetChapter === null) continue;
-      const entry = m.get(fb.targetChapter) ?? { count: 0, items: [] as { text: string; from: string }[] };
-      entry.count++;
-      const fromLabel = ch.num === 0 ? (ch.title ? `序章 · ${ch.title}` : "序章") : `第${ch.num}章`;
-      entry.items.push({ text: fb.text, from: fromLabel });
-      m.set(fb.targetChapter, entry);
-    }
-  }
-  return m;
-});
+const payoffMap = computed(() => buildPayoffMap(volumeOutline.value));
 
 const currentPayoffs = computed(() =>
   currentChapterNum.value !== null ? payoffMap.value.get(currentChapterNum.value)?.items ?? [] : [],
 );
 
 /* ---------------- 跳转到正文块 ---------------- */
-function normText(t: string): string {
-  return (t || "").replace(/[*_~>#`]/g, "").replace(/[\s：:。，,．！？!?·…、"'“”「」【】—\-]/g, "");
+/** 当前章节对应的正文块范围；识别不到章节时退回全篇。 */
+function blocksForCurrentChapter(all: HTMLElement[]): HTMLElement[] {
+  const heads = chapterHeadEls.value;
+  if (heads.length === 0 || currentChapterNum.value === null) return all;
+
+  const idx = heads.findIndex((h) => h.num === currentChapterNum.value);
+  if (idx < 0) return all;
+
+  const start = all.indexOf(heads[idx].el);
+  if (start < 0) return all;
+  const nextEl = idx + 1 < heads.length ? heads[idx + 1].el : null;
+  const end = nextEl ? all.indexOf(nextEl) : all.length;
+  const slice = all.slice(start, end > start ? end : all.length);
+  return slice.length > 0 ? slice : all;
+}
+
+function highlightBlock(el: HTMLElement) {
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.style.boxShadow = "inset 0 0 0 2px rgb(var(--primary-rgb, 2 132 199) / 0.9)";
+  el.style.borderRadius = "4px";
+  el.style.transition = "box-shadow 0.25s ease";
+  window.setTimeout(() => {
+    el.style.boxShadow = "";
+    el.style.borderRadius = "";
+  }, 1800);
 }
 
 function jumpToBlock(target: string) {
-  const anchor = normText(target).slice(0, 24);
-  if (!anchor || !editorEl.value) return;
-  const blocks = Array.from(editorEl.value.querySelectorAll<HTMLElement>(".md-block"));
-  let hit: HTMLElement | null = null;
-  for (const b of blocks) {
-    const text = normText(b.innerText || "");
-    if (text.includes(anchor) || anchor.includes(text.slice(0, 8))) {
-      hit = b;
-      break;
-    }
+  const key = toSearchKey(target);
+  if (!key || !editorEl.value) return;
+
+  const all = Array.from(editorEl.value.querySelectorAll<HTMLElement>(".md-block"));
+  if (all.length === 0) return;
+
+  /* 先在本章范围内找，找不到再放宽到全篇，避免跳到别的章节去。 */
+  const scoped = blocksForCurrentChapter(all);
+  let pool = scoped;
+  let match = pickBestBlock(key, pool.map((b) => b.innerText || ""));
+  if (match.index < 0 && pool.length !== all.length) {
+    pool = all;
+    match = pickBestBlock(key, pool.map((b) => b.innerText || ""));
   }
-  if (!hit) return;
-  hit.scrollIntoView({ behavior: "smooth", block: "center" });
-  hit.style.boxShadow = "inset 0 0 0 2px rgb(var(--primary-rgb) / 0.9)";
-  hit.style.transition = "box-shadow 0.25s ease";
-  window.setTimeout(() => {
-    if (hit) hit.style.boxShadow = "";
-  }, 1800);
+
+  if (match.index < 0) {
+    showToast("未找到对应正文", `正文中暂未出现「${target.slice(0, 14)}」相关段落`, "edit");
+    return;
+  }
+
+  highlightBlock(pool[match.index]);
 }
 </script>
 
@@ -1266,6 +972,9 @@ function jumpToBlock(target: string) {
               </div>
               <div v-if="fb.targetChapter !== null" class="fb-target">
                 收回点 → 第{{ fb.targetChapter }}章
+              </div>
+              <div v-else-if="fb.targetText" class="fb-target plain">
+                关联 → {{ fb.targetText.length > 24 ? fb.targetText.slice(0, 24) + '…' : fb.targetText }}
               </div>
             </div>
           </div>
@@ -2006,6 +1715,12 @@ function jumpToBlock(target: string) {
   font-size: 0.64rem;
   color: #b45309;
   font-weight: 700;
+}
+
+.fb-target.plain {
+  color: #92703a;
+  font-weight: 600;
+  opacity: 0.9;
 }
 
 .py-from {

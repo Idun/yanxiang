@@ -3075,10 +3075,11 @@ defineExpose({
 
 /* 列表项：用 div 承载，缩进与项目符号自绘，间距对齐 .reading-view li。 */
 :deep(.md-list-item) {
+  position: relative;
   margin: 0.24em 0;
   padding-left: 1.6em;
-  text-indent: -1.6em;
   line-height: inherit;
+  box-sizing: border-box;
 }
 
 /* 列表块的首尾与相邻段落之间留出成组的间距，让列表整体成为一个视觉块。 */
@@ -3226,18 +3227,45 @@ defineExpose({
   background: rgb(var(--primary-rgb) / 0.34);
 }
 
-/* 列表项在非激活状态下显示实心圆点或序号，激活时隐藏圆点并暴露出 - 或 1. 语法 */
+/* 列表项在非激活状态下显示实心圆点或序号，激活时隐藏圆点并暴露出 - 或 1. 语法。
+   项目符号 / 序号绝对定位在左侧槽位内，多行排版自然对齐。 */
 :deep(.md-bullet),
 :deep(.md-number) {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1.5em;
   display: inline-block;
   color: var(--primary);
-  margin-right: 6px;
+  text-align: left;
+  line-height: inherit;
   user-select: none;
+  pointer-events: none;
+}
+
+:deep(.md-bullet) {
+  text-align: center;
+}
+
+/* 聚焦时折叠项目符号，并把内边距收窄到安全值，让 - / 1. 语法完整落在正文左缘之内。 */
+:deep(.md-block.is-focused.md-list-item),
+:deep(.md-list-item.is-focused) {
+  padding-left: 0.5em;
+  padding-right: 0.5em;
 }
 
 :deep(.md-block.is-focused .md-bullet),
 :deep(.md-block.is-focused .md-number) {
   display: none;
+}
+
+:deep(.md-block.is-focused.md-list-item > .md-syntax),
+:deep(.md-list-item.is-focused > .md-syntax) {
+  display: inline;
+  font-family: var(--code-font);
+  color: var(--primary);
+  font-weight: 600;
+  margin-right: 4px;
 }
 
 :deep(.code-fence-top),

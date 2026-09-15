@@ -1,45 +1,44 @@
 /**
- * 文档界面 WYSIWYG 阅读辅助侧栏的数据逻辑：
- * - 当前章节出场人物的启发式提取（人物星图数据）；
- * - 当前位置地图地点匹配（mapStore 里的地点标签与本章正文比对）；
- * - 章节号识别与「卷纲 → 对应章节细纲」解析（含【伏笔】呈现点与收回点）。
+ * 文档界面 WYSIWYG 阅读辅助侧栏的解析逻辑（纯函数，无 Vue 依赖，便于单测）：
+ * - 章节号识别 / 章节切分；
+ * - 「细纲文档 → 对应章节细纲」解析：本节构成（情境·欲望·冲突·转变·结果）
+ *   与【伏笔】呈现点、收回点。
  *
- * 全部是纯数据 + 纯函数，组件层只负责渲染与交互。
+ * 组件层（DocReadingRails.vue）只负责渲染与交互，解析规则集中在这里维护。
  */
-import { mapStore, type MapPlace } from "./mapStore";
-import type { DocFileItem } from "./documentFilesStore";
 
 /* ================= 中文数字 ================= */
 
-const CN_DIGITS: Record<string, number> = {
-  零: 0, 一: 1, 二: 2, 三: 3, 四: 4,
-  五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
-};
-
-function cnToNumber(s: string): number | null {
-  if (!s) return null;
-  if (/^\d{1,4}$/.test(s)) {
-    const n = parseInt(s, 10);
-    return n > 0 ? n : null;
+/** 把「12」「十二」「二十」「一百零三」等章号字符串转成数字；无法识别返回 null。 */
+export function parseChineseOrArabicNum(str: string): number | null {
+  if (!str) return null;
+  if (/^\d+$/.test(str)) return parseInt(str, 10);
+  const cnMap: Record<string, number> = {
+    零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+    十: 10, 百: 100
+  };
+  if (str.length === 1 && cnMap[str] !== undefined) return cnMap[str];
+  let val = 0;
+  let temp = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str[i];
+    const n = cnMap[char];
+    if (n === undefined) continue;
+    if (n === 10) {
+      val += (temp || 1) * 10;
+      temp = 0;
+    } else if (n === 100) {
+      val += (temp || 1) * 100;
+      temp = 0;
+    } else {
+      temp = n;
+    }
   }
-  const of = (ch: string): number =>
-    Object.prototype.hasOwnProperty.call(CN_DIGITS, ch) ? CN_DIGITS[ch] : -1;
-  if (/^[零一二三四五六七八九]$/.test(s)) return of(s);
-  if (s === "十") return 10;
-  const m100 = /^([一二三四五六七八九])?百([零一二三四五六七八九])?$/.exec(s);
-  if (m100) {
-    const h = m100[1] ? of(m100[1]) : 1;
-    const r = m100[2] ? of(m100[2]) : 0;
-    return h >= 1 && r >= 0 ? h * 100 + r : null;
-  }
-  const ti = s.indexOf("十");
-  if (ti >= 0) {
-    const tens = ti === 0 ? 1 : of(s[ti - 1]);
-    const ones = ti + 1 < s.length ? of(s[s.length - 1]) : 0;
-    return tens >= 1 && ones >= 0 ? tens * 10 + ones : null;
-  }
-  return null;
+  val += temp;
+  return val >= 0 ? val : null;
 }
+
+/* ================= 章节识别 ================= */
 
 export interface ChapterInfo {
   num: number;
@@ -47,429 +46,667 @@ export interface ChapterInfo {
   title: string;
 }
 
-const SPECIAL_CHAPTER_MAP: Record<string, number> = {
-  序章: 0,
-  前言: 0,
-  楔子: 0,
-  引子: 0,
-  序言: 0,
-  序: 0,
-  尾声: 9990,
-  后记: 9990,
-  结语: 9990,
-  附录: 9990,
-  番外篇: 9995,
-  番外: 9995,
-  外传: 9995,
-};
-
-/** 从标题 / 段落起始行识别章号与标签（包含数字章第X章/Chapter X，以及序章/楔子/前言/尾声/番外等非数字章）。 */
+/** 从一行标题里识别章号与标题（支持「第X章」「——第X章——」「序章」「Chapter 3」）。 */
 export function detectChapterInfo(text: string): ChapterInfo | null {
-  const line = (text || "").trim().split("\n")[0] || "";
-  if (!line) return null;
+  const cleaned = text.replace(/^[#\s—\-]+/, "").trim();
+  const match = /^(?:(序章|前言|楔子|引子|序言|序|尾声|后记|结语|附录|番外篇|番外|外传)|第\s*([0-9一二三四五六七八九十百零]+)\s*章|Chapter\s*(\d+))(?:[：:\s·—\-]+(.*))?$/i.exec(cleaned);
+  if (!match) return null;
 
-  // 正则匹配：支持 1) 序章/楔子/尾声/番外等; 2) 第X章; 3) Chapter X
-  const re = /^\s*(?:#{1,6}\s+)?(?:——\s*)?(?:(序章|前言|楔子|引子|序言|序|尾声|后记|结语|附录|番外篇|番外|外传)|第\s*([0-9一二三四五六七八九十百零]+)\s*章|(?:Chapter|CH|Ch)\.?\s*([0-9]+))[：:\s、·—-]*([^\n]*)/i;
-  const m = re.exec(line);
-  if (!m) return null;
-
-  if (m[1]) {
-    const spec = m[1].trim();
-    const num = SPECIAL_CHAPTER_MAP[spec] ?? 0;
-    return {
-      num,
-      label: spec,
-      title: (m[4] || "").trim(),
-    };
+  if (match[1]) {
+    return { num: 0, label: match[1], title: match[4] || match[1] };
   }
 
-  if (m[2]) {
-    const num = cnToNumber(m[2]);
-    if (num === null) return null;
-    return {
-      num,
-      label: `第${num}章`,
-      title: (m[4] || "").trim(),
-    };
-  }
+  const numStr = match[2] || match[3];
+  const num = parseChineseOrArabicNum(numStr);
+  if (num === null) return null;
 
-  if (m[3]) {
-    const num = parseInt(m[3], 10);
-    if (!num || isNaN(num)) return null;
-    return {
-      num,
-      label: `第${num}章`,
-      title: (m[4] || "").trim(),
-    };
-  }
-
-  return null;
+  const label = `第${num}章`;
+  const title = match[4] || "";
+  return { num, label, title };
 }
 
-/** 从标题 / 正文中识别章号：优先匹配「第X章」或序章/楔子等，返回 null 表示识别不到。 */
-export function detectChapterNumber(text: string): number | null {
-  const info = detectChapterInfo(text);
-  return info ? info.num : null;
+/** 从整篇正文里识别首个章号。 */
+export function detectChapterNumber(content: string): number | null {
+  if (!content) return null;
+  const match = /(?:^|\n)(?:#{1,6}\s+|——\s*)?(?:(序章|前言|楔子|引子|序言|序|尾声|后记|结语)|第\s*([0-9一二三四五六七八九十百零]+)\s*章|Chapter\s*(\d+))/i.exec(content);
+  if (!match) return null;
+  if (match[1]) return 0;
+  return parseChineseOrArabicNum(match[2] || match[3]);
 }
 
-/** 格式化章号对应的显示标签（如 "序章", "楔子", "第6章"）。 */
-export function formatChapterLabel(num: number | null, fallbackLabel?: string): string {
-  if (fallbackLabel) return fallbackLabel;
-  if (num === null) return "正文";
-  if (num === 0) return "序章";
-  if (num === 9990) return "尾声";
-  if (num === 9995) return "番外";
-  return `第${num}章`;
-}
+/** 把正文按章节标题切成 [start, end) 区段。 */
+export function splitChapters(content: string): Array<{ num: number; start: number; end: number }> {
+  if (!content) return [];
+  const slices: Array<{ num: number; start: number; end: number }> = [];
+  const regex = /(?:^|\n)(?:#{1,6}\s+|——\s*)?(?:序章|前言|楔子|引子|序言|序|尾声|后记|结语|第\s*[0-9一二三四五六七八九十百零]+\s*章|Chapter\s*\d+)(?:[：:\s·—\-]+[^\n]*)?/gi;
 
-/** 判断一个文档是否为「大纲 / 细纲 / 设定 / 非正文规划文档」（此类文档在左右两侧需屏蔽人物星图与细纲轴）。
- *  注意：严格仅从【文档名称/标题】做判断，不要从文档内容做判断，因为细纲和大纲内容中也会包含“第X章”等章节数。
- */
-export function isNonMainDocument(
-  fileItem: DocFileItem | undefined,
-): boolean {
-  if (!fileItem) return false;
-  const title = (fileItem.title || "").trim();
-  if (!title) return false;
+  let match: RegExpExecArray | null;
+  const points: { num: number; index: number }[] = [];
 
-  return /卷纲|章纲|细纲|大纲|纲要|分集|设定|人物卡|设定集|灵感|构思|梗概|草稿|脑图|话本|人物志|世界观|地图集/i.test(
-    title,
-  );
-}
-
-/* ================= 章节切分 ================= */
-
-export interface ChapterSlice {
-  num: number;
-  label: string;
-  title: string;
-  /** 在原文中的起始偏移（字符级）。 */
-  start: number;
-  end: number;
-}
-
-/** 把正文按「第X章」或「序章/楔子」标题切成章节块；匹配不到任何章则当作单章整篇返回。 */
-export function splitChapters(md: string): ChapterSlice[] {
-  const base = md || "";
-  const re = /(?:^|\n)\s*(?:#{1,6}\s+)?(?:——\s*)?(?:(序章|前言|楔子|引子|序言|序|尾声|后记|结语|附录|番外篇|番外|外传)|第\s*([0-9一二三四五六七八九十百零]+)\s*章|(?:Chapter|CH|Ch)\.?\s*([0-9]+))[：:\s、·—-]*([^\n]*)/gi;
-  const marks: { index: number; num: number; label: string; title: string }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(base))) {
-    if (m.index === re.lastIndex) re.lastIndex++;
-    const info = detectChapterInfo(m[0]);
-    if (!info) continue;
-    marks.push({ index: m.index, num: info.num, label: info.label, title: info.title });
-  }
-
-  if (marks.length === 0) {
-    return base.trim() ? [{ num: 0, label: "全文", title: "", start: 0, end: base.length }] : [];
-  }
-
-  const out: ChapterSlice[] = [];
-  marks.forEach((mark, i) => {
-    const end = i + 1 < marks.length ? marks[i + 1].index : base.length;
-    out.push({ num: mark.num, label: mark.label, title: mark.title, start: mark.index, end });
-  });
-  return out;
-}
-
-/* ================= 出场人物提取 ================= */
-
-export interface CharacterNode {
-  name: string;
-  count: number;
-  /** 选中过的段落里与其他角色的共现数（星图连线的权重）。 */
-  edges: Map<string, number>;
-}
-
-function isStopName(name: string): boolean {
-  const stop = new Set([
-    "他说", "她说", "他说", "有人", "众人", "大家", "对方", "那人", "男人",
-    "女人", "少年", "少女", "老人", "大哥", "小子", "某人", "我们", "你们",
-    "他们", "她们", "自己", "天下", "世界", "大人", "将军", "陛下", "姑娘",
-    "师傅", "师哥", "师兄", "师弟", "师姐", "妹子", "姐姐", "哥哥", "孩子",
-  ]);
-  return stop.has(name) || name.length < 2 || name.length > 5;
-}
-
-const STOP_CJK_SET = new Set(
-  "的了着呢吗吧啊呀哦呃嗯哈嘻哈哈呵呵可是但是于是因为所以如果虽然既然即使还是就是但是不过只是然而却并而便都也又再才刚正在已经曾经就要会能可以应该必须"
-    .split(""),
-);
-
-/** 把一个中文段落里可能的「人名」候选抽出来（启发式）。 */
-function candidateNamesFromParagraph(para: string): string[] {
-  const names = new Set<string>();
-  const stripVerb = (name: string): string =>
-    name.replace(/[说道问喊叫笑答喝应]$/, "").trim();
-
-  /* 1) 「xxx说 / 道 / 问 / 喊 / 笑道 …」前面的 2–4 字人名候选。 */
-  const attribution = /([\u4e00-\u9fff]{2,4})(?:说|道|问|喊|叫|笑|答|喝道|厉声道|低声道|轻声道|苦笑道|应道|开口道|摇摇头|点点头)[：:，。！？\s"“”「」]/g;
-  let m: RegExpExecArray | null;
-  while ((m = attribution.exec(para))) {
-    const cand = stripVerb(m[1].trim());
-    if (cand && /[\u4e00-\u9fff]/.test(cand[cand.length - 1])) names.add(cand);
-  }
-
-  /* 2) 【名字】标记，并剥离「·」前缀装饰。 */
-  for (const mm of para.matchAll(/【[\s·]?([\u4e00-\u9fffA-Za-z·]{2,12})[\s·]?】/g)) {
-    const cand = mm[1].trim().replace(/^[·\s]+|[·\s]+$/g, "");
-    if (cand) names.add(cand);
-  }
-
-  /* 3) 英文专名（全名或首字母大写且出现≥1次的连续词）。 */
-  for (const mm of para.matchAll(/\b[A-Z][A-Za-z]{1,18}\b/g)) {
-    const cand = mm[0].trim();
-    if (!/^(I|The|Chapter|Mr|Mrs|Sir|Lord)\b/.test(cand)) names.add(cand);
-  }
-
-  return Array.from(names).filter((n) => !isStopName(n));
-}
-
-/** 按段落做人物候选增量：先收集一轮全体出现数，再筛出「稳定」的人物。 */
-export function extractCharacters(md: string): CharacterNode[] {
-  const base = (md || "").replace(/```[\s\S]*?```/g, " ").replace(/```/g, " ");
-  const paras = base
-    .split(/\n{1,}/)
-    .map((p) => p.replace(/[#>*`_~\-=]/g, " ").trim())
-    .filter((p) => p.length >= 2);
-
-  const rawCount = new Map<string, number>();
-  const perPara = new Map<string, Set<string>>();
-  for (const para of paras) {
-    const cands = candidateNamesFromParagraph(para);
-    if (cands.length === 0) continue;
-    for (const c of cands) rawCount.set(c, (rawCount.get(c) ?? 0) + 1);
-    const arr = perPara.get(para) ?? new Set<string>();
-    for (const c of cands) arr.add(c);
-    perPara.set(para, arr);
-  }
-
-  /* 只用「出现 ≥2 次 或 长度 ≥4」的人物，避免单次误识；
-     再剔掉纯停用字组成的 2 字组合。 */
-  const freq = Array.from(rawCount.entries())
-    .filter(([name, c]) => {
-      if (name.length > 5) return false;
-      if (c < 2 && name.length < 4) return false;
-      if (/^[\u4e00-\u9fff]{2}$/.test(name)) {
-        return !STOP_CJK_SET.has(name[0]) && !STOP_CJK_SET.has(name[1]);
-      }
-      return true;
-    })
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 8);
-
-  const nodes: CharacterNode[] = freq.map(([name, count]) => {
-    const edges = new Map<string, number>();
-    for (const set of perPara.values()) {
-      if (!set.has(name)) continue;
-      for (const other of set) {
-        if (other === name) continue;
-        edges.set(other, (edges.get(other) ?? 0) + 1);
-      }
+  while ((match = regex.exec(content)) !== null) {
+    const info = detectChapterInfo(match[0].trim());
+    if (info !== null) {
+      points.push({ num: info.num, index: match.index });
     }
-    return { name, count, edges };
-  });
-
-  return nodes;
-}
-
-/* ================= 地图地点匹配 ================= */
-
-export interface MatchedPlace {
-  place: MapPlace;
-  count: number;
-}
-
-/** 从本章正文中找出「点名出现」的地图地点。 */
-export function extractMapPlaces(md: string, places: MapPlace[]): MatchedPlace[] {
-  const base = md || "";
-  const out: MatchedPlace[] = [];
-  for (const place of places) {
-    const label = (place.label || "").trim();
-    if (!label || label.length < 1) continue;
-    let count = 0;
-    let idx = 0;
-    while ((idx = base.indexOf(label, idx)) !== -1) {
-      count++;
-      idx += label.length;
-    }
-    if (count > 0) out.push({ place, count });
   }
-  return out.sort((a, b) => b.count - a.count);
+
+  for (let i = 0; i < points.length; i++) {
+    const start = points[i].index;
+    const end = i + 1 < points.length ? points[i + 1].index : content.length;
+    slices.push({ num: points[i].num, start, end });
+  }
+
+  return slices;
 }
 
-/* ================= 卷纲 / 章节细纲解析 ================= */
+/* ================= 细纲结构 ================= */
 
 export interface OutlineSection {
   label: string;
-  /** 定位用的锚文本（取节名首句，用于在正文里找对应块）。 */
   anchor: string;
+  situation?: string; // 情境
+  desire?: string;    // 欲望
+  conflict?: string;  // 冲突
+  turn?: string;      // 转变
+  result?: string;    // 结果
 }
 
-export interface OutlineForeshadow {
+export interface ForeshadowItem {
   text: string;
-  /** 关联目标描述（原文，如「后文第十二章……」）。 */
-  targetText: string;
-  /** 解析出的目标章号（没有标注章号则为 null）。 */
   targetChapter: number | null;
+  targetText?: string;
 }
 
 export interface OutlineChapter {
   num: number;
   title: string;
   sections: OutlineSection[];
-  foreshadows: OutlineForeshadow[];
-  /** 该章原始文本。 */
-  start: number;
-  end: number;
+  foreshadows: ForeshadowItem[];
 }
 
-/** 小节锚文本去 Markdown 记号与后置标点，便于在正文块里精确匹配。 */
-function cleanAnchor(text: string): string {
-  return text
-    .replace(/[*_~>#`]/g, "")
-    .replace(/[：:。，,．！？!?·…、\s]+$/g, "")
-    .slice(0, 24);
+/** 识别「情境 / 欲望 / 冲突 / 转变 / 结果」五要素行。 */
+export function matchDramaTag(
+  line: string,
+): { key: "situation" | "desire" | "conflict" | "turn" | "result"; val: string } | null {
+  const h = /^(?:[-*+\s]*)(?:[*_~`]|【)?(情境|背景|环境|起因|欲望|动机|目标|冲突|阻碍|矛盾|转变|转折|契机|变化|结果|后果|结局|悬念)(?:[*_~`]|】)?[:：\s]+(.*)/i.exec(line);
+  if (!h) return null;
+  const d = h[1].trim();
+  const val = h[2].replace(/^[*_~`]+|[*_~`]+$/g, "").trim();
+  if (["情境", "背景", "环境", "起因"].includes(d)) return { key: "situation", val };
+  if (["欲望", "动机", "目标"].includes(d)) return { key: "desire", val };
+  if (["冲突", "阻碍", "矛盾"].includes(d)) return { key: "conflict", val };
+  if (["转变", "转折", "契机", "变化"].includes(d)) return { key: "turn", val };
+  if (["结果", "后果", "结局", "悬念"].includes(d)) return { key: "result", val };
+  return null;
 }
 
-/** 在一个给定区段内收集：小节（编号 / 标题行）与【伏笔】条目。 */
-function parseOutlineBlock(text: string): { sections: OutlineSection[]; foreshadows: OutlineForeshadow[] } {
-  const sections: OutlineSection[] = [];
-  const foreshadows: OutlineForeshadow[] = [];
+/* ================= 伏笔条目切分 ================= */
 
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
+/* ①-⑳ / ⒈-⒛ / ㈠-㈩ 三段带圈序号。 */
+const CIRCLED_CHAR = "\u2460-\u2473\u2488-\u249B\u3220-\u3229";
+const CIRCLED_GLOBAL_RE = new RegExp(`[${CIRCLED_CHAR}]`, "g");
 
-    /* 场面 / 小节：数字加顿号、中文数字、括号数字或【】包裹的小节名。 */
-    const numMatch = /^\s*(?:\d{1,2}|[一二三四五六七八九十]+)[、.．\s]\s*(\S.{0,40})/.exec(line);
-    if (numMatch && /[\u4e00-\u9fffA-Za-z]/.test(numMatch[1])) {
-      sections.push({ label: line.slice(0, 40), anchor: cleanAnchor(numMatch[1]) });
-      continue;
-    }
-    const parenMatch = /^\s*[（(]\s*(?:\d{1,2}|[一二三四五六七八九十]+)\s*[)）]\s*(\S.{0,40})/.exec(line);
-    if (parenMatch && /[\u4e00-\u9fffA-Za-z]/.test(parenMatch[1])) {
-      sections.push({ label: line.slice(0, 40), anchor: cleanAnchor(parenMatch[1]) });
-      continue;
-    }
-    const bracket = /^(?:——\s*)?【([\u4e00-\u9fffA-Za-z0-9·，、\s]{2,24})】\s*$/.exec(line);
-    if (bracket) {
-      sections.push({ label: line.slice(0, 40), anchor: cleanAnchor(bracket[1]) });
-      continue;
-    }
+/** 一条伏笔的起始标记：带圈序号 / (1) / 1. / - 等。 */
+const ENTRY_HEAD_RE = new RegExp(
+  `^(?:[${CIRCLED_CHAR}]|[（(]\\s*\\d{1,2}\\s*[)）]|\\d{1,2}\\s*[.、．]|[-*+•]\\s+)`,
+);
 
-    /* 伏笔行：圈号开头，可能带「—— 关联…」目标。 */
-    const fb = /^[①②③④⑤⑥⑦⑧⑨]+\s*(.+?)(?:——|—|——)\s*关联?\s*(.+)$/.exec(line);
-    if (fb) {
-      foreshadows.push({
-        text: fb[1].trim().slice(0, 60),
-        targetText: fb[2].trim().slice(0, 60),
-        targetChapter: detectChapterNumber(fb[2]),
-      });
-      continue;
-    }
-    const fb2 = /^[①②③④⑤⑥⑦⑧⑨]+\s*(.+)$/.exec(line);
-    if (fb2) {
-      foreshadows.push({
-        text: fb2[1].trim().slice(0, 60),
-        targetText: "",
-        targetChapter: null,
-      });
-    }
+/** 明显属于「上一条的续行」：以破折号 / 箭头 / 括注 / 关联词开头。 */
+const CONTINUATION_RE = /^(?:——|—|─|→|=>|、|，|,|（|\(|关联|收回|回收|对应|呼应|指向|后文|后续|下文)/;
+
+/** 同一行里出现多个带圈序号时（「① a；② b；③ c」），按序号切成多段。 */
+function splitInlineByCircled(line: string): string[] {
+  const marks: number[] = [];
+  let m: RegExpExecArray | null;
+  CIRCLED_GLOBAL_RE.lastIndex = 0;
+  while ((m = CIRCLED_GLOBAL_RE.exec(line)) !== null) marks.push(m.index);
+  if (marks.length <= 1) return [line];
+
+  const out: string[] = [];
+  if (marks[0] > 0) {
+    const head = line.slice(0, marks[0]).trim();
+    if (head) out.push(head);
   }
-  return { sections, foreshadows };
-}
-
-/** 解析一份卷纲 / 章纲文件：按「第X章」切分，逐章抽取小节与伏笔。 */
-export function parseVolumeOutline(md: string): OutlineChapter[] {
-  const base = md || "";
-  const chapters = splitChapters(base);
-  if (chapters.length === 0) return [];
-
-  const out: OutlineChapter[] = [];
-  for (const ch of chapters) {
-    const block = base.slice(ch.start, ch.end);
-    const { sections, foreshadows } = parseOutlineBlock(block);
-    out.push({
-      num: ch.num,
-      title: ch.title,
-      sections,
-      foreshadows,
-      start: ch.start,
-      end: ch.end,
-    });
+  for (let i = 0; i < marks.length; i++) {
+    const end = i + 1 < marks.length ? marks[i + 1] : line.length;
+    const seg = line.slice(marks[i], end).trim();
+    if (seg) out.push(seg);
   }
   return out;
 }
 
-/** 判断一份文档内容看起来像「卷纲 / 章节细纲」：至少包含结构化小节或伏笔。 */
-export function looksLikeOutline(md: string): boolean {
-  const outline = parseVolumeOutline(md);
-  if (outline.length >= 2) {
-    return outline.some((ch) => ch.foreshadows.length > 0 || ch.sections.length > 0 || !!ch.title);
+/**
+ * 把【伏笔】区域的原始行切成「一条一条」的伏笔文本。
+ *
+ * 需要同时兼容三种真实写法：
+ * 1. 一行一条（带或不带序号）；
+ * 2. 一行挤多条（「① a；② b；③ c」）—— 旧实现在这里会把 5 条并成 1 条；
+ * 3. 一条跨多行（正文一行、「—— 关联第X章」另起一行）。
+ */
+export function splitForeshadowEntries(lines: string[]): string[] {
+  const parts: string[] = [];
+  for (const raw of lines) {
+    const line = (raw || "").trim();
+    if (!line) continue;
+    parts.push(...splitInlineByCircled(line));
   }
-  if (outline.length === 1) {
-    return outline[0].foreshadows.length > 0 || outline[0].sections.length > 0;
+
+  const merged: string[] = [];
+  let cur = "";
+  for (const p of parts) {
+    const isHead = ENTRY_HEAD_RE.test(p);
+    const isCont = !isHead && CONTINUATION_RE.test(p);
+    if (cur && isCont) {
+      cur += p;
+      continue;
+    }
+    if (cur.trim()) merged.push(cur.trim());
+    cur = p;
   }
+  if (cur.trim()) merged.push(cur.trim());
+
+  /* 无序号但用「；」并列多条、且各段各自带「第X章」时再拆一次。 */
+  const out: string[] = [];
+  for (const entry of merged) {
+    const hits = entry.match(/第\s*[0-9一二三四五六七八九十百零]+\s*章/g);
+    if (hits && hits.length >= 2 && /[；;]/.test(entry)) {
+      let split = false;
+      const segs = entry
+        .split(/[；;]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (segs.length >= 2 && segs.every((s) => /第\s*[0-9一二三四五六七八九十百零]+\s*章/.test(s))) {
+        out.push(...segs);
+        split = true;
+      }
+      if (split) continue;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/** 解析单条伏笔文本，拆出「伏笔正文」与「收回点章号」。 */
+export function parseForeshadowLine(line: string): ForeshadowItem {
+  const clean = line
+    .replace(/^[-*+\d.、\s]+/, "")
+    .replace(new RegExp(`^[${CIRCLED_CHAR}]\\s*`), "")
+    .replace(/^[（(]\s*\d{1,2}\s*[)）]\s*/, "")
+    .trim();
+
+  const chapterRe = /第\s*([0-9一二三四五六七八九十百零]+)\s*章/;
+  const toNum = (raw: string): number | null => {
+    const n = parseChineseOrArabicNum(raw);
+    return n !== null && !isNaN(n) && n > 0 ? n : null;
+  };
+
+  /* 章纲模板写法：「[伏笔内容] —— 关联[后文章节与事件]」，
+     优先按破折号切出「伏笔正文」与「关联目标」两段。 */
+  let text = clean;
+  let targetText = "";
+  let targetChapter: number | null = null;
+
+  const sepMatch = /\s*(?:——|—|─{2,}|→|=>|\|)\s*/.exec(clean);
+  if (sepMatch && sepMatch.index > 0) {
+    text = clean.slice(0, sepMatch.index);
+    targetText = clean.slice(sepMatch.index + sepMatch[0].length).trim();
+  }
+
+  const tailHit = targetText ? chapterRe.exec(targetText) : null;
+  if (tailHit) {
+    targetChapter = toNum(tailHit[1]);
+  } else {
+    /* 无破折号时，退回识别行内「收回点 / 关联 第X章」标注并裁掉该尾巴。 */
+    const inlineHit =
+      /[-—─→>|~～\s]*(?:(?:收回点|目标收回|收回|回收|关联|对应|埋设|呼应|指向|伏线)\s*(?:后文|后续|下文)?\s*)?[（(]?\s*第\s*([0-9一二三四五六七八九十百零]+)\s*章/.exec(
+        clean,
+      );
+    if (inlineHit) {
+      targetChapter = toNum(inlineHit[1]);
+      if (!sepMatch && inlineHit.index > 0) {
+        text = clean.slice(0, inlineHit.index);
+        targetText = clean.slice(inlineHit.index).trim();
+      }
+    }
+  }
+
+  text = text
+    .replace(/^(?:(?:\*\*|【)?(?:伏笔记录|伏笔呈现|伏笔|线索)(?:\*\*|】)?[:：\s]*)/, "")
+    .replace(/[*_~`]/g, "")
+    .replace(/[-—─→>|~～、，,；;：:\s]+$/, "")
+    .trim();
+  if (!text) text = clean.replace(/[*_~`]/g, "").trim();
+
+  return { text, targetChapter, targetText: targetText || undefined };
+}
+
+/* ================= 细纲文档解析 ================= */
+
+/** 【伏笔】块起始标记（含同行内联首条内容）。 */
+const FB_BLOCK_RE = /【\s*(?:伏笔|伏笔呈现|伏笔记录|伏笔埋设|伏笔线索|线索埋设)\s*】\s*[:：]?\s*(.*)$/i;
+/** 无书名号的裸标题写法：「### 伏笔」「**伏笔**：」。 */
+const FB_BARE_HEAD_RE = /^[#>*_~\s-]*(?:伏笔呈现|伏笔记录|伏笔埋设|伏笔线索|线索埋设|伏笔)[*_~`\s]*[:：]?[*_~`\s]*$/;
+/** 本节构成块标记。 */
+const SECTION_BLOCK_RE = /【\s*(?:本节构成|细纲|场景|节构成|小节构成|场景规划)\s*】/i;
+/** 任意【…】块标题（用于关闭伏笔区域）。 */
+const ANY_BLOCK_RE = /^[*_~`\s]*【[^】]{1,20}】/;
+
+export function parseVolumeOutline(content: string): OutlineChapter[] {
+  if (!content || !content.trim()) return [];
+
+  const chapters: OutlineChapter[] = [];
+  const lines = content.split(/\r?\n/);
+
+  let curChapter: OutlineChapter | null = null;
+  let curSection: OutlineSection | null = null;
+  let fbBuffer: string[] = [];
+  let inForeshadowBlock = false;
+  let sectionCounter = 1;
+
+  /* 伏笔区域收尾：整段一起切条，避免「一行多条 / 一条多行」被漏计或错并。 */
+  const flushForeshadows = () => {
+    inForeshadowBlock = false;
+    if (fbBuffer.length === 0) return;
+    const entries = splitForeshadowEntries(fbBuffer);
+    fbBuffer = [];
+    if (!curChapter) return;
+    for (const entry of entries) {
+      const fb = parseForeshadowLine(entry);
+      if (fb.text) curChapter.foreshadows.push(fb);
+    }
+  };
+
+  const commitSection = () => {
+    if (curChapter && curSection) {
+      if (
+        curSection.label ||
+        curSection.situation ||
+        curSection.desire ||
+        curSection.conflict ||
+        curSection.turn ||
+        curSection.result
+      ) {
+        if (!curSection.label) {
+          curSection.label = `场景 ${sectionCounter++}`;
+        }
+        curChapter.sections.push({ ...curSection });
+      }
+      curSection = null;
+    }
+  };
+
+  const commitChapter = () => {
+    flushForeshadows();
+    commitSection();
+    if (curChapter) {
+      if (curChapter.sections.length > 0 || curChapter.foreshadows.length > 0 || curChapter.title.trim()) {
+        const existing = chapters.find((c) => c.num === curChapter!.num);
+        if (existing) {
+          existing.sections.push(...curChapter.sections);
+          existing.foreshadows.push(...curChapter.foreshadows);
+          if (!existing.title && curChapter.title) existing.title = curChapter.title;
+        } else {
+          chapters.push(curChapter);
+        }
+      }
+      curChapter = null;
+    }
+    sectionCounter = 1;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    // 1. 章节标题识别
+    const chapInfo = detectChapterInfo(line);
+    if (chapInfo !== null) {
+      commitChapter();
+      curChapter = {
+        num: chapInfo.num,
+        title: chapInfo.title,
+        sections: [],
+        foreshadows: [],
+      };
+      continue;
+    }
+
+    if (!curChapter) {
+      curChapter = { num: 0, title: "", sections: [], foreshadows: [] };
+    }
+
+    // 2. 伏笔块标识（【伏笔】独立成行 / 同行带首条内容 / 「### 伏笔」裸标题）
+    const fbBlockMatch = FB_BLOCK_RE.exec(line);
+    const isBareForeshadowHeading = !fbBlockMatch && FB_BARE_HEAD_RE.test(line);
+    if (fbBlockMatch || isBareForeshadowHeading) {
+      flushForeshadows();
+      commitSection();
+      inForeshadowBlock = true;
+      const inlineRest = ((fbBlockMatch && fbBlockMatch[1]) || "").replace(/^[*_~`]+|[*_~`]+$/g, "").trim();
+      if (inlineRest) fbBuffer.push(inlineRest);
+      continue;
+    }
+    // 本节构成块标识
+    if (SECTION_BLOCK_RE.test(line)) {
+      flushForeshadows();
+      commitSection();
+      continue;
+    }
+    // 其它【…】块标题（【五线落实对照】【场面设计】…）：关闭伏笔区域，避免吞掉后续内容
+    if (inForeshadowBlock && ANY_BLOCK_RE.test(line)) {
+      flushForeshadows();
+    }
+
+    // 3. 独立伏笔行识别（「伏笔：xxx」单行写法，不进入区域模式）
+    if (/^(?:[-*+\d.、\s]+)?(?:\*\*|【)?(?:伏笔记录|伏笔呈现|伏笔|线索)(?:\*\*|】)?[:：]/.test(line)) {
+      flushForeshadows();
+      commitSection();
+      const fb = parseForeshadowLine(line);
+      if (fb.text) curChapter.foreshadows.push(fb);
+      continue;
+    }
+
+    if (inForeshadowBlock) {
+      /* 伏笔区域内出现五要素标签，说明已切回本节构成，交还后续流程处理。 */
+      if (!matchDramaTag(line)) {
+        fbBuffer.push(line);
+        continue;
+      }
+      flushForeshadows();
+    }
+
+    // 3.5 区域外的带圈序号伏笔行（需带「关联 / 收回 / 第X章」等线索特征，
+    //     避免误吞本节构成条目）
+    if (
+      new RegExp(`^[${CIRCLED_CHAR}]\\s*`).test(line) &&
+      /(?:关联|收回|回收|呼应|对应|指向|伏笔|伏线|埋设|第\s*[0-9一二三四五六七八九十百零]+\s*章)/.test(line)
+    ) {
+      commitSection();
+      for (const entry of splitForeshadowEntries([line])) {
+        const fb = parseForeshadowLine(entry);
+        if (fb.text) curChapter.foreshadows.push(fb);
+      }
+      continue;
+    }
+
+    // 4. 解析戏剧五要素（情境 / 欲望 / 冲突 / 转变 / 结果）
+    const dt = matchDramaTag(line);
+    if (dt) {
+      if (!curSection) {
+        curSection = { label: `场景 ${sectionCounter++}`, anchor: dt.val.slice(0, 16) };
+      }
+      curSection[dt.key] = dt.val;
+      continue;
+    }
+
+    // 5. 识别新小节/场景标题
+    const secHeadMatch = /^(?:[-*+\d.\s]+|#{1,6}\s*)?(?:场景|节|小节|分节|段落)[\s\d一二三四五六七八九十：:]*(.*)/i.exec(line);
+    if (secHeadMatch) {
+      commitSection();
+      const rawTitle = secHeadMatch[1].trim() || line.replace(/^[-*+\d.\s#]+/, "").trim();
+      const anchor = rawTitle.split(/[（(：:|]/)[0].trim() || rawTitle;
+      curSection = { label: rawTitle, anchor };
+      continue;
+    }
+
+    // 6. 普通列表项
+    if (/^[-*+]\s+/.test(line) || /^\d+[.、]\s*/.test(line)) {
+      commitSection();
+      const text = line.replace(/^[-*+\d.、\s]+/, "").trim();
+      curSection = {
+        label: text.split(/[（(：:|]/)[0].trim() || text.slice(0, 16),
+        anchor: text.slice(0, 15),
+      };
+    }
+  }
+
+  commitChapter();
+  return chapters;
+}
+
+/* ================= 文档甄别 ================= */
+
+/** 非正文规划文档（大纲 / 细纲 / 设定等），编辑它们本身时需屏蔽侧轨。 */
+export function isNonMainDocument(file?: {
+  title?: string;
+  content?: string;
+  folderId?: string | null;
+}): boolean {
+  if (!file) return false;
+  const title = (file.title || "").trim().toLowerCase();
+  const content = (file.content || "").slice(0, 1500).toLowerCase();
+
+  const titleKeywords = [
+    "大纲", "细纲", "卷纲", "章纲", "分章", "梗概", "设定", "人物", "世界观",
+    "地图", "灵感", "素材", "草稿", "前言", "目录", "总结", "卡片", "卷一",
+    "卷二", "卷三", "卷四", "卷五", "卷六", "卷七", "卷八", "卷九", "卷十",
+    "outline", "setting", "world", "character", "draft", "notes"
+  ];
+  if (titleKeywords.some((k) => title.includes(k))) return true;
+
+  if (
+    /^(?:#{1,3}\s*)?(?:卷纲|细纲|章纲|大纲|分章大纲|人物设定|世界观|场景规划|故事线索|伏笔汇总|资料库)/i.test(content) ||
+    /【(?:本节构成|细纲|场景规划|核心看点|伏笔|收回点|人物关系|角色列表)】/.test(content)
+  ) {
+    return true;
+  }
+
   return false;
 }
 
-/** 在当前文件同文件夹或全局下找「卷纲」：优先同文件夹标题匹配，其次结构最全的。 */
-export function findVolumeOutlineFile(
-  files: DocFileItem[],
-  currentFileId: string | null,
-): DocFileItem | undefined {
-  if (!currentFileId) return undefined;
-  const current = files.find((f) => f.id === currentFileId);
-  if (!current) return undefined;
+/** 严格判定「细纲」文档，避免把纯大纲当成细纲。 */
+export function isDetailedOutlineDocument(file?: { title?: string; content?: string }): boolean {
+  if (!file) return false;
+  const title = (file.title || "").trim();
+  const content = (file.content || "").slice(0, 2000);
 
-  const sameFolder = files.filter(
-    (f) => f.id !== currentFileId && f.folderId === current.folderId,
-  );
+  const isExplicitDetailedTitle = /细纲|章纲|分章细纲|场景规划/i.test(title);
+  const isPureGeneralOutlineTitle = /(?:总大纲|主线大纲|剧情大纲|大纲|分卷大纲)(?!.*细纲)/i.test(title);
 
-  // 1. 同文件夹下优先匹配标题带卷纲/细纲/大纲关键字且解析出章节的
-  const sameFolderTitleMatch = sameFolder.find(
-    (f) => /卷纲|章纲|细纲|大纲|卷|章表/i.test(f.title || "") && parseVolumeOutline(f.content).length > 0,
-  );
-  if (sameFolderTitleMatch) return sameFolderTitleMatch;
+  if (isExplicitDetailedTitle) return true;
+  if (isPureGeneralOutlineTitle) return false;
 
-  // 2. 同文件夹下结构候选
-  const sameFolderCandidates = sameFolder.filter((f) => looksLikeOutline(f.content));
-  if (sameFolderCandidates.length > 0) {
-    sameFolderCandidates.sort((a, b) => parseVolumeOutline(b.content).length - parseVolumeOutline(a.content).length);
-    return sameFolderCandidates[0];
+  if (/【\s*(?:本节构成|细纲|场景规划|分节细纲|节构成)\s*】/i.test(content)) {
+    return true;
   }
 
-  // 3. 跨文件夹回退（用户可能把大纲/卷纲放在根目录或专属目录）
-  const otherFiles = files.filter((f) => f.id !== currentFileId && f.folderId !== current.folderId);
-  const globalTitleMatch = otherFiles.find(
-    (f) => /卷纲|章纲|细纲|大纲|卷|章表/i.test(f.title || "") && parseVolumeOutline(f.content).length > 0,
-  );
-  if (globalTitleMatch) return globalTitleMatch;
-
-  const globalCandidates = otherFiles.filter((f) => looksLikeOutline(f.content));
-  if (globalCandidates.length > 0) {
-    globalCandidates.sort((a, b) => parseVolumeOutline(b.content).length - parseVolumeOutline(a.content).length);
-    return globalCandidates[0];
-  }
-
-  return undefined;
+  return false;
 }
 
-/** 卷纲里、某一章作为「收回点」承接的伏笔（来自更前章节、目标指向该章）。 */
-export function payoffsForChapter(outline: OutlineChapter[], chapterNum: number): OutlineForeshadow[] {
-  const out: OutlineForeshadow[] = [];
+/** 在文档列表里检索当前正文对应的细纲文档：优先同文件夹。 */
+export function findDetailedOutlineFile<T extends { id: string; folderId?: string | null; title?: string; content?: string }>(
+  files: T[],
+  currentFileId: string | null,
+): T | undefined {
+  if (!files || files.length === 0) return undefined;
+  const current = files.find((f) => f.id === currentFileId);
+
+  // 1. 优先同文件夹下的细纲文档
+  if (current && current.folderId) {
+    const sameFolderOutline = files.find(
+      (f) => f.folderId === current.folderId && isDetailedOutlineDocument(f)
+    );
+    if (sameFolderOutline) return sameFolderOutline;
+  }
+
+  // 2. 检索所有文件中的细纲
+  return files.find((f) => isDetailedOutlineDocument(f));
+}
+
+/** 汇总「以某章为收回点」的前置伏笔。 */
+export function buildPayoffMap(
+  outline: OutlineChapter[],
+): Map<number, { count: number; items: { text: string; from: string }[] }> {
+  const m = new Map<number, { count: number; items: { text: string; from: string }[] }>();
   for (const ch of outline) {
-    if (ch.num === chapterNum) continue;
     for (const fb of ch.foreshadows) {
-      if (fb.targetChapter === chapterNum) out.push(fb);
+      if (fb.targetChapter === null) continue;
+      const entry = m.get(fb.targetChapter) ?? { count: 0, items: [] as { text: string; from: string }[] };
+      entry.count++;
+      const fromLabel = ch.num === 0 ? (ch.title ? `序章 · ${ch.title}` : "序章") : `第${ch.num}章`;
+      entry.items.push({ text: fb.text, from: fromLabel });
+      m.set(fb.targetChapter, entry);
     }
   }
-  return out;
+  return m;
 }
 
-/** 全局地图地点视图里「本章出场」需要 mapStore 快照，这里导出便捷函数供组件使用。 */
-export function placesInStore(): MapPlace[] {
-  return mapStore.places;
+/* ================= 正文定位（侧栏点击跳转） ================= */
+
+/** 归一化：去 Markdown 记号与标点，只留可比对的字面内容。 */
+export function normText(t: string): string {
+  return (t || "")
+    .replace(/[*_~>#`]/g, "")
+    .replace(
+      /[\s：:。，,．！？!?·…、"'“”‘’「」『』（）()〔〕\[\]【】《》〈〉—–\-~～;；]/g,
+      "",
+    );
 }
+
+/**
+ * 把侧栏条目文本转成检索键。
+ *
+ * 细纲里的伏笔写法是「[伏笔内容] —— 关联第X章…（说明…）」，
+ * 其中「—— 关联…」与括注说明都是规划用的元信息，正文里不会出现，
+ * 必须先剥掉，否则拿去正文里检索必然落空。
+ */
+export function toSearchKey(raw: string): string {
+  const stripped = (raw || "")
+    .replace(/^[\s\-*+>#]+/, "")
+    .replace(/^[①-⑳⒈-⒛㈠-㈩]\s*/, "")
+    .replace(/^[（(]\s*\d{1,2}\s*[)）]\s*/, "")
+    .replace(/^\d{1,2}\s*[.、．]\s*/, "")
+    .replace(/(?:——|—|─{2,}|→|=>)[\s\S]*$/, "")
+    .replace(
+      /(?:关联|收回点|收回|回收|呼应|对应|指向|埋设)\s*(?:后文|后续|下文)?\s*第\s*[0-9一二三四五六七八九十百零]+\s*章[\s\S]*$/,
+      "",
+    )
+    .replace(/^(?:\*\*|【)?(?:伏笔记录|伏笔呈现|伏笔|线索)(?:\*\*|】)?[:：]\s*/, "")
+    .replace(/[（(][^）)]{0,40}[）)]/g, "");
+  return normText(stripped).slice(0, 40);
+}
+
+/** 高频虚词 / 通用字：仅由它们构成的重合不算有效线索。 */
+const COMMON_CHARS = new Set(
+  "的了着是在有和与不之其为以而且也就都上下里外前后这那他她它我你们个一二三四五六七八九十只把被对于从向到还又再很更最没要会能可说道看见".split(
+    "",
+  ),
+);
+
+export interface BlockMatch {
+  index: number;
+  score: number;
+  exact: boolean;
+}
+
+/** 计算单个正文块与检索键的匹配得分（0~1）。 */
+export function scoreBlockMatch(key: string, text: string): number {
+  const k = normText(key).slice(0, 40);
+  const t = normText(text);
+  if (!k || !t) return 0;
+
+  if (t.includes(k)) return 1.0;
+
+  let totalNonCommon = 0;
+  for (let i = 0; i < k.length; i++) {
+    if (!COMMON_CHARS.has(k[i])) totalNonCommon++;
+  }
+  if (totalNonCommon === 0) return 0;
+
+  const coveredIndices = new Set<number>();
+  let maxSegmentLen = 0;
+  let numSegments = 0;
+
+  /* 按「不重叠的最长片段」扫描：让「梁上」+「红绸」这类分散线索累计加分，
+     从而胜过只在同一段落里凑出的单个长片段。 */
+  let i = 0;
+  while (i + 1 < k.length) {
+    let len = 0;
+    for (let j = i + 2; j <= k.length; j++) {
+      const sub = k.slice(i, j);
+      if (t.includes(sub)) {
+        len = j - i;
+      } else {
+        break;
+      }
+    }
+    if (len >= 2) {
+      const subStr = k.slice(i, i + len);
+      let hasNonStop = false;
+      for (let x = 0; x < subStr.length; x++) {
+        if (!COMMON_CHARS.has(subStr[x])) {
+          hasNonStop = true;
+          break;
+        }
+      }
+      if (hasNonStop) {
+        numSegments++;
+        if (len > maxSegmentLen) maxSegmentLen = len;
+        for (let x = i; x < i + len; x++) coveredIndices.add(x);
+        i += len;
+        continue;
+      }
+    }
+    i++;
+  }
+
+  if (coveredIndices.size === 0) return 0;
+
+  let coveredNonCommon = 0;
+  for (const idx of coveredIndices) {
+    if (!COMMON_CHARS.has(k[idx])) coveredNonCommon++;
+  }
+
+  if (coveredNonCommon === 0) return 0;
+
+  const coverageRatio = coveredNonCommon / totalNonCommon;
+  const lenBonus = Math.min(1.0, maxSegmentLen / 4);
+  const segmentBonus = Math.min(0.3, (numSegments - 1) * 0.15);
+
+  return coverageRatio * 0.5 + lenBonus * 0.25 + segmentBonus;
+}
+
+/**
+ * 在正文块里找与检索键最相近的一块。
+ *
+ * 侧栏条目（尤其是伏笔）是细纲里的概括说法，与正文措辞往往不是逐字相同
+ * （细纲「判官笔上的暗红指痕」↔ 正文「判官笔，笔杆上有一抹早已发暗的红」），
+ * 因此按「整串命中 → 包含实词的片段覆盖率 + 最长片段 + 离散线索数」综合打分，
+ * 并避开 Markdown 空行块；达不到阈值宁可不跳，也不要跳错地方。
+ *
+ * 返回 index = -1 表示未命中。
+ */
+export function pickBestBlock(key: string, blockTexts: string[]): BlockMatch {
+  const k = normText(key).slice(0, 40);
+  const miss: BlockMatch = { index: -1, score: 0, exact: false };
+  if (!k) return miss;
+
+  let best = miss;
+
+  for (let i = 0; i < blockTexts.length; i++) {
+    const raw = blockTexts[i];
+    const text = normText(raw);
+    /* 空块（Markdown 空行）必须跳过：旧实现里 anchor.includes("") 恒为 true，
+       导致所有跳转都落在文档里第一个空行上。 */
+    if (!text) continue;
+
+    if (text.includes(k)) {
+      return { index: i, score: 1.0, exact: true };
+    }
+
+    /* 短键（人名 / 地名 <= 3 字）只认精确命中，避免误跳。 */
+    if (k.length <= 3) continue;
+
+    const score = scoreBlockMatch(k, text.slice(0, 600));
+    if (score > best.score) {
+      best = { index: i, score, exact: false };
+    }
+  }
+
+  if (best.index >= 0 && best.score >= 0.25) {
+    return best;
+  }
+  return miss;
+}
+

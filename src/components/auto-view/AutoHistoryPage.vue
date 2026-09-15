@@ -14,6 +14,7 @@ import {
   Trash2,
 } from "lucide-vue-next";
 import type { AiTurn } from "../../autoStore";
+import { formatTokensCompact } from "../../tokenStore";
 
 interface Props {
   aiTurns: AiTurn[];
@@ -97,11 +98,15 @@ function toggleHistoryEntry(id: number) {
           <span class="history-entry-time">{{ turn.timestamp }}</span>
           <span v-if="turn.isBlankDoc || turn.variant === 'blank'" class="history-card-tokens" title="空白文稿字符统计">
             <FileText :size="11" :stroke-width="1.9" />
-            {{ (turn.content || '').length.toLocaleString() }} 字符
+            {{ formatTokensCompact((turn.content || '').length) }} 字符
           </span>
-          <span v-else-if="turn.tokens" class="history-card-tokens">
+          <span
+            v-else-if="turn.tokens"
+            class="history-card-tokens"
+            :title="`消耗 ${turn.tokens.toLocaleString()} Tokens`"
+          >
             <Coins :size="11" :stroke-width="1.9" />
-            {{ turn.tokens.toLocaleString() }}
+            {{ formatTokensCompact(turn.tokens) }}
           </span>
           <button
             class="history-entry-caret"

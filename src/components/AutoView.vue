@@ -122,7 +122,7 @@ import { READER_AGENT_PROMPT } from "../prompts/readerAgent";
 import { CHAT_AGENT_PROMPT } from "../prompts/chatAgent";
 import { REFINE_AGENT_PROMPT } from "../prompts/refineAgent";
 import { showToast } from "../insightStore";
-import { recordTokens } from "../tokenStore";
+import { formatTokensCompact, recordTokens } from "../tokenStore";
 import { renderForReading } from "../markdown";
 import {
   applyContentColoring,
@@ -133,6 +133,7 @@ import { docStore } from "../docStore";
 import { createDocFile, documentFilesStore } from "../documentFilesStore";
 import { pulseAiDocEdit } from "../aiDocActivity";
 import { startLongPressDrag } from "../longPressDrag";
+import { typewriterRunwayPx } from "../typewriterScroll";
 import ReaderResultInline from "./ReaderResultInline.vue";
 import AutoBlankDoc from "./auto-view/AutoBlankDoc.vue";
 import AutoWorkflowBar, { type WorkflowStepId } from "./auto-view/AutoWorkflowBar.vue";
@@ -488,6 +489,19 @@ function buildSetupDirective(): string {
   push("叙事节奏", PACE_OPTIONS, setupPace.value);
   if (rows.length === 0) return "";
   return "【创作设定】\n" + rows.join("\n");
+}
+
+/**
+ * 故事状态追踪表注入项:把角色等级/装备、未解伏笔、场景局势、世界规则与要点
+ * 统一格式化为一段可注入的上下文。所有会产出正文/话本/重写的入口都走这里,
+ * 保证 AI 写前必读、写时不冲突。状态表为空时返回空串,不注入空模板。
+ */
+function stateLedgerContext(): string {
+  try {
+    return storyStateStore.formatStatePromptForChapter();
+  } catch {
+    return "";
+  }
 }
 
 /* ---------------- Left Panel: Tabs for Source Material and Drafts ----------------
@@ -944,6 +958,15 @@ const aiMessage = computed<AiTurn>(() => {
 
 const hasOutput = computed(() => aiTurns.value.length > 0);
 
+/** 最近一条「剧情正文」产出(跳过审核意见 / 读者报告 / 大纲 / 细纲 / 话本 / 空白文稿)。
+    状态表「从正文更新」与提示注入都只认它,避免被非正文产出污染。 */
+const latestStoryProseTurn = computed<AiTurn | null>(() => {
+  for (let i = aiTurns.value.length - 1; i >= 0; i--) {
+    if (isStoryProseTurn(aiTurns.value[i])) return aiTurns.value[i];
+  }
+  return null;
+});
+
 let currentAbortController: AbortController | null = null;
 
 function formatCurrentTime(): string {
@@ -1137,7 +1160,25 @@ function isAuditOrReaderTurn(turn: AiTurn): boolean {
   return false;
 }
 
-/** 仅对话与AI写作的回复正文支持底部信息栏的变体操作与下一章按钮，审核意见与读者模式不展示 */
+/** 是否属于「规划文档」类产出:故事大纲 / 章节细纲 / 对话话本等非剧情正文。
+    状态表「从正文更新」只应作用于真正的剧情正文,必须把这些剔除。 */
+function isPlanningDocTurn(turn: AiTurn): boolean {
+  if (!turn) return false;
+  return isOutlineTurn(turn) || isChapterOutlineTurn(turn) || isDialogueTurn(turn);
+}
+
+/** 剧情正文判定:仅对话 / AI写作产出的正文,且排除审核意见、读者评估报告、
+    故事大纲、章节细纲、对话话本与空白文稿。状态表「从正文更新」只认它。 */
+function isStoryProseTurn(turn: AiTurn): boolean {
+  if (!turn) return false;
+  if (isAuditOrReaderTurn(turn)) return false;
+  if (isPlanningDocTurn(turn)) return false;
+  if (turn.isBlankDoc || turn.variant === "blank") return false;
+  if (!turn.content || !turn.content.trim()) return false;
+  return turn.mode === "chat" || turn.mode === "writer" || !turn.mode;
+}
+
+/** 仅对话与AI写作的回复正文支持底部信息栏的变体操作与下一章按钮,审核意见与读者模式不展示 */
 function canShowVariantActions(turn: AiTurn): boolean {
   if (!turn) return false;
   if (isAuditOrReaderTurn(turn)) return false;
@@ -2879,20 +2920,24 @@ interface AuditDocOption {
 
 const auditDocOptions = computed<AuditDocOption[]>(() => {
   const list: AuditDocOption[] = [];
-  const latestBody = aiMessage.value.content.trim();
-  if (latestBody) {
+  /* 待处理文档只能是「剧情正文」:审核意见 / 读者评估报告不能作为被审 / 被评对象,
+     否则报告会被再次送进审核,形成报告审报告的循环;大纲 / 细纲 / 话本等规划文档
+     与空白文稿同样剔除。 */
+  const candidates = aiTurns.value.filter((t) => isStoryProseTurn(t));
+  const latest = candidates[candidates.length - 1];
+  if (latest) {
     list.push({
       id: "current",
-      label: `最新产出：${turnLabel(aiMessage.value)}（${latestBody.length} 字）`,
-      content: aiMessage.value.content,
+      label: "最新产出:" + turnLabel(latest) + "(" + latest.content.trim().length + " 字)",
+      content: latest.content,
     });
   }
-  for (const t of [...aiTurns.value].reverse()) {
+  for (const t of [...candidates].reverse()) {
+    if (t.id === latest?.id) continue;
     const body = t.content.trim();
-    if (!body || t.id === aiMessage.value.id) continue;
     list.push({
       id: String(t.id),
-      label: `${turnLabel(t)}${t.timestamp ? ` · ${t.timestamp}` : ""}（${body.length} 字）`,
+      label: turnLabel(t) + (t.timestamp ? " · " + t.timestamp : "") + "(" + body.length + " 字)",
       content: t.content,
     });
   }
@@ -2906,6 +2951,14 @@ function resolveAuditDocContent(): string {
   const hit = opts.find((o) => o.id === auditDocId.value);
   return (hit ?? opts[0]).content;
 }
+/* 下拉选项集合变化时,若当前选中的文档已不再可选(例如原来是审核意见报告,
+   现已被过滤掉),自动回落到最新正文,避免审核 / 读者拿到失效内容。 */
+watch(auditDocOptions, (opts) => {
+  if (opts.length === 0) return;
+  if (!opts.some((o) => o.id === auditDocId.value)) {
+    auditDocId.value = opts[0].id;
+  }
+});
 
 /* ---------------- Paragraph Text Selection & Floating Refinement Toolbar ----------------
    用户在正文中划选文字后，精修功能栏不再固定在回复卡片顶部，而是作为悬浮面板
@@ -4287,6 +4340,23 @@ watch(selectedText, (val) => {
 
 let middleContentObserver: ResizeObserver | null = null;
 
+/* ---------------- 中间区 WYSIWYG 末尾跑道 ----------------
+   与「文档」界面 WYSIWYG(paper-card)同一套末尾留白:纸张底部 = 96px + 跑道,
+   跑道由 typewriterRunwayPx 按可视高度算,保证正文最后一行也能被滚到面板中部。
+   这里把同一个值挂到产出列表的底部内边距上,让中间区「末尾往上的高度」与文档界面一致。 */
+const autoEditorRunwayPx = ref(0);
+
+function refreshAutoEditorRunway() {
+  const el = middleEditorRef.value;
+  if (!el || el.clientHeight <= 0) {
+    autoEditorRunwayPx.value = 0;
+    return;
+  }
+  const lh = editorFontSize.value * editorLineHeight.value;
+  const room = Math.max(0, el.clientHeight - (editorMarginY.value + 18 + 96));
+  autoEditorRunwayPx.value = Math.min(typewriterRunwayPx(el, lh), room);
+}
+
 onMounted(async () => {
   document.addEventListener("click", handleDocumentClick);
   document.addEventListener("mousedown", onDocMouseDown);
@@ -4308,6 +4378,7 @@ onMounted(async () => {
   /* 监听中间区域尺寸变化（流式思考链与正文动态增高），在用户处于底部时持续自动钉底 */
   if (middleEditorRef.value) {
     middleContentObserver = new ResizeObserver(() => {
+      refreshAutoEditorRunway();
       if (isGenerating.value && !userScrolledUp.value && !isScrollingToBottom) {
         if (middleEditorRef.value) {
           middleEditorRef.value.scrollTop = middleEditorRef.value.scrollHeight;
@@ -4315,6 +4386,7 @@ onMounted(async () => {
       }
     });
     middleContentObserver.observe(middleEditorRef.value);
+    refreshAutoEditorRunway();
   }
 
   /* 恢复 / 记忆中间区阅读停留位置（v-show 显隐跳变时补恢复）。 */
@@ -4400,11 +4472,17 @@ function buildUserPrompt(sourceBody?: string): string {
     );
   }
 
+  /* 5. 故事状态追踪表:角色等级装备、未解伏笔、场景局势与要点约束 */
+  const stateLedger = stateLedgerContext();
+  if (stateLedger) {
+    contextParts.push(stateLedger);
+  }
+
   const extraContext = contextParts.length > 0 ? "\n\n" + contextParts.join("\n\n") : "";
 
-  /* 审核意见 / 读者：复用系统设置里已配置的审核 / 读者智能体，
-     这里只负责把待处理正文交过去，具体怎么审、怎么评一律由该智能体的
-     系统提示词决定，不在此另起一套指令。 */
+  /* 审核意见 / 读者:复用系统设置里已配置的审核 / 读者智能体,
+     这里只负责把待处理正文交过去,具体怎么审、怎么评一律由该智能体的
+     系统提示词决定,不在此另起一套指令。 */
   if (!showWritingForm.value) {
     const body = (sourceBody ?? "").trim();
     if (!body) {
@@ -4480,9 +4558,15 @@ function buildChapterOutlinePrompt(): string {
     );
   }
 
+  /* 故事状态追踪表:规划后续章纲时也要对齐已有等级、装备与未解伏笔 */
+  const stateLedger = stateLedgerContext();
+  if (stateLedger) {
+    contextParts.push(stateLedger);
+  }
+
   const extraContext = contextParts.length > 0 ? "\n\n" + contextParts.join("\n\n") : "";
 
-  return `【大纲或构思灵感】：${topicContent.value || "请依据设定自由构思关键章节"}${extraContext}`;
+  return `【大纲或构思灵感】:${topicContent.value || "请依据设定自由构思关键章节"}${extraContext}`;
 }
 
 async function startChapterOutlineGeneration() {
@@ -4540,6 +4624,12 @@ function buildDialogueOnlyPrompt(baseBody?: string): string {
     );
   }
 
+  /* 故事状态追踪表:话本同样要承接角色等级、装备与未解伏笔 */
+  const stateLedger = stateLedgerContext();
+  if (stateLedger) {
+    contextParts.push(stateLedger);
+  }
+
   const extraContext =
     contextParts.length > 0 ? "\n\n" + contextParts.join("\n\n") : "";
 
@@ -4580,7 +4670,7 @@ function buildNextChapterPrompt(): string {
   }
 
   // 读取状态追踪表，确保写新章前掌握等级、装备、伏笔与当前要点
-  const stateLedgerPrompt = storyStateStore.formatStatePromptForChapter();
+  const stateLedgerPrompt = stateLedgerContext();
   if (stateLedgerPrompt) {
     contextParts.push(stateLedgerPrompt);
   }
@@ -4920,6 +5010,11 @@ watch(
   () => nextTick(refreshScrollBottomBtnOverlap),
   { deep: true },
 );
+/* 排版(字号 / 行距 / 段边距)变化后重算末尾跑道,保证与文档界面同步。 */
+watch(
+  [editorFontSize, editorLineHeight, editorMarginY],
+  () => nextTick(refreshAutoEditorRunway),
+);
 
 /* 产出列表变化（新增 / 删除 / 定位）后，刷新目录条高亮。 */
 watch(
@@ -5201,9 +5296,14 @@ async function startGenerationCore(
       );
       if (narratives.length > 0) {
         contextParts.push(
-          "【叙事定制要求（结构 / 手法 / 结局）】:\n" +
+          "【叙事定制要求(结构 / 手法 / 结局)】:\n" +
             narratives.map((n) => `- ${n.name}: ${n.desc}`).join("\n")
         );
+      }
+      /* 变体重写/优化也要读取状态表,防止等级倒退或装备凭空出现 */
+      const stateLedger = stateLedgerContext();
+      if (stateLedger) {
+        contextParts.push(stateLedger);
       }
       const extraContext =
         contextParts.length > 0 ? "\n\n" + contextParts.join("\n\n") : "";
@@ -6616,9 +6716,9 @@ function clearOutput() {
             <span class="history-entry-title">{{ turnLabel(turn) }}</span>
             <span class="history-entry-chars">{{ turn.content.trim().length }} 字</span>
             <span class="history-entry-time">{{ turn.timestamp }}</span>
-            <span v-if="turn.tokens" class="history-card-tokens">
+            <span v-if="turn.tokens" class="history-card-tokens" :title="`消耗 ${turn.tokens.toLocaleString()} Tokens`">
               <Coins :size="11" :stroke-width="1.9" />
-              {{ turn.tokens.toLocaleString() }}
+              {{ formatTokensCompact(turn.tokens) }}
             </span>
             <button
               class="history-entry-caret"
@@ -7073,8 +7173,8 @@ function clearOutput() {
         <!-- Tab Content 3: 故事状态追踪表（等级、装备、伏笔、要点独立分存） -->
         <div v-show="leftActiveTab === 'state'" class="flex-1 min-h-0 flex flex-col overflow-hidden -mx-3.5 -mb-5 mt-2">
           <AutoStoryStateTracker
-            :current-doc-title="turnLabel(aiMessage)"
-            :current-doc-content="aiMessage.content"
+            :current-doc-title="latestStoryProseTurn ? turnLabel(latestStoryProseTurn) : ''"
+            :current-doc-content="latestStoryProseTurn ? latestStoryProseTurn.content : ''"
           />
         </div>
       </aside>
@@ -8039,7 +8139,11 @@ function clearOutput() {
                让用户随时能回看自己之前发了什么，也便于 AI 上下文自洽。
                AI 回复正文一律以 WYSIWYG 原地编辑呈现，修改自动保存，
                不再需要逐条点开「编辑正文」按钮。 -->
-          <div class="turn-list" :class="{ 'is-paged': chatLayoutMode === 'paged' }">
+          <div
+            class="turn-list"
+            :class="{ 'is-paged': chatLayoutMode === 'paged' }"
+            :style="{ '--auto-runway': autoEditorRunwayPx + 'px' }"
+          >
             <!-- 翻页模式专属顶部翻页导航栏：左右翻页控制与轮次状态 -->
             <div v-if="chatLayoutMode === 'paged'" class="paged-conversation-bar">
               <button
@@ -8718,13 +8822,17 @@ function clearOutput() {
                   >
                     <Type :size="11" :stroke-width="1.9" />
                     <span>字符数</span>
-                    <strong>{{ (turn.content || '').length.toLocaleString() }}</strong>
+                    <strong>{{ formatTokensCompact((turn.content || '').length) }}</strong>
                   </div>
-                  <!-- 常规 AI 产出显示 Tokens 消耗 -->
-                  <div v-else-if="turn.tokens" class="token-widget" title="消耗Token数">
+                  <!-- 常规 AI 产出显示 Tokens 消耗(大数折算为「万」,避免挤压左侧按钮) -->
+                  <div
+                    v-else-if="turn.tokens"
+                    class="token-widget"
+                    :title="`消耗 ${turn.tokens.toLocaleString()} Tokens`"
+                  >
                     <Coins :size="11" :stroke-width="1.9" />
                     <span>Tokens</span>
-                    <strong>{{ turn.tokens.toLocaleString() }}</strong>
+                    <strong>{{ formatTokensCompact(turn.tokens) }}</strong>
                   </div>
                   <div
                     v-if="turn.continued"
@@ -11273,7 +11381,7 @@ function clearOutput() {
   overflow-y: auto;
   overflow-x: hidden;
   background-color: var(--surface-bright);
-  padding: 0 0 100px 0;
+  padding: 0;
   margin: 0;
   display: flex;
   flex-direction: column;
@@ -11572,7 +11680,7 @@ function clearOutput() {
   width: 100%;
   min-height: 100%;
   background-color: var(--surface-bright);
-  padding: 14px 14px 40px;
+  padding: 14px 8px 0;
   display: flex;
   flex-direction: column;
   position: relative;
@@ -12241,20 +12349,22 @@ function clearOutput() {
   flex-direction: column;
 }
 
-/* Turn List: 中间区按时间顺序保留的全部 AI 产出条目 */
+/* Turn List: 中间区按时间顺序保留的全部 AI 产出条目
+   底部 = 固定 96px + 末尾跑道(--auto-runway),与「文档」界面 WYSIWYG 的纸张
+   底部留白(calc(96px + 跑道))完全一致,末尾最后一行也能被滚到面板中部。 */
 .turn-list {
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 12px 18px 140px;
+  padding: 12px 10px calc(96px + var(--auto-runway, 0px));
 }
 
 .turn-card {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px 20px 20px;
+  padding: 16px 16px 20px;
   border: 1px solid var(--outline-variant);
   border-radius: 14px;
   background-color: var(--surface-bright);
@@ -12266,7 +12376,7 @@ function clearOutput() {
 }
 
 .turn-card:last-child {
-  margin-bottom: 54px;
+  margin-bottom: 0;
 }
 
 .turn-card.is-current {
@@ -13335,8 +13445,11 @@ function clearOutput() {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 .footer-variant-actions-row {
@@ -13350,6 +13463,24 @@ function clearOutput() {
   scrollbar-width: none;
   -ms-overflow-style: none;
   padding: 0 4px;
+}
+
+/* 窄面板下:左侧统计不再撑开挤压,优先让中间按钮组收缩滚动;统计本身也允许收缩省略 */
+@media (max-width: 900px) {
+  .reply-footer-meta {
+    gap: 6px;
+  }
+
+  .footer-left-meta {
+    flex: 0 0 auto;
+    max-width: 40%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .footer-left-meta::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 .footer-variant-actions-row::-webkit-scrollbar {
@@ -13688,15 +13819,20 @@ function clearOutput() {
   background: var(--surface-container-low);
   border: 1px solid var(--outline-variant);
   font-size: 0.75rem;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .token-widget svg {
   color: var(--primary);
+  flex-shrink: 0;
 }
 
 .token-widget strong {
   color: var(--primary);
   font-family: var(--code-font);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .continued-widget {
