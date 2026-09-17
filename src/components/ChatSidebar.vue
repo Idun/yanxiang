@@ -12,6 +12,8 @@ import { activeDocFile, documentFilesStore } from "../documentFilesStore";
 import { pulseAiDocEdit } from "../aiDocActivity";
 import { showToast } from "../insightStore";
 import { WRITER_AGENT_NAME, WRITER_AGENT_PROMPT } from "../prompts/writerAgent";
+import { CHAPTER_OUTLINE_AGENT_NAME, CHAPTER_OUTLINE_AGENT_PROMPT } from "../prompts/chapterOutlineAgent";
+import { DIALOGUE_SCRIPT_AGENT_NAME, DIALOGUE_SCRIPT_AGENT_PROMPT } from "../prompts/dialogueScriptAgent";
 import { AUDITOR_AGENT_NAME, AUDITOR_AGENT_PROMPT } from "../prompts/auditorAgent";
 import { READER_AGENT_NAME, READER_AGENT_PROMPT, extractReaderEvaluation } from "../prompts/readerAgent";
 import { CHAT_AGENT_PROMPT } from "../prompts/chatAgent";
@@ -147,7 +149,7 @@ const props = defineProps<{
   activeMainTab?: "home" | "docs" | "library" | "auto" | "refine" | "insight";
 }>();
 
-export type SidebarTab = "chat" | "writer" | "auditor" | "reader";
+export type SidebarTab = "chat" | "writer" | "chapter_outline" | "dialogue_script" | "auditor" | "reader";
 
 const activeSidebarTab = ref<SidebarTab>("chat");
 
@@ -242,6 +244,18 @@ const activeWriterHistoryId = ref<number | null>(null);
 const writerMessages = ref<ChatMessage[]>([]);
 const writerComposerText = ref("");
 
+/* --- Decoupled States for Chapter Outline (章节细纲) --- */
+const chapterOutlineChatHistory = ref<ChatHistoryItem[]>([]);
+const activeChapterOutlineHistoryId = ref<number | null>(null);
+const chapterOutlineMessages = ref<ChatMessage[]>([]);
+const chapterOutlineComposerText = ref("");
+
+/* --- Decoupled States for Dialogue Script (对话话本) --- */
+const dialogueScriptChatHistory = ref<ChatHistoryItem[]>([]);
+const activeDialogueScriptHistoryId = ref<number | null>(null);
+const dialogueScriptMessages = ref<ChatMessage[]>([]);
+const dialogueScriptComposerText = ref("");
+
 /* --- Decoupled States for Auditor --- */
 const auditorChatHistory = ref<ChatHistoryItem[]>([]);
 const activeAuditorHistoryId = ref<number | null>(null);
@@ -267,6 +281,10 @@ function saveChatData() {
       freeChatHistory: freeChatHistory.value,
       writerMessages: writerMessages.value,
       writerChatHistory: writerChatHistory.value,
+      chapterOutlineMessages: chapterOutlineMessages.value,
+      chapterOutlineChatHistory: chapterOutlineChatHistory.value,
+      dialogueScriptMessages: dialogueScriptMessages.value,
+      dialogueScriptChatHistory: dialogueScriptChatHistory.value,
       auditorMessages: auditorMessages.value,
       auditorChatHistory: auditorChatHistory.value,
       readerMessages: readerMessages.value,
@@ -291,6 +309,10 @@ function loadChatData() {
     if (Array.isArray(data.freeChatHistory)) freeChatHistory.value = data.freeChatHistory.map(replacePlaceholderTime);
     if (Array.isArray(data.writerMessages)) writerMessages.value = data.writerMessages;
     if (Array.isArray(data.writerChatHistory)) writerChatHistory.value = data.writerChatHistory.map(replacePlaceholderTime);
+    if (Array.isArray(data.chapterOutlineMessages)) chapterOutlineMessages.value = data.chapterOutlineMessages;
+    if (Array.isArray(data.chapterOutlineChatHistory)) chapterOutlineChatHistory.value = data.chapterOutlineChatHistory.map(replacePlaceholderTime);
+    if (Array.isArray(data.dialogueScriptMessages)) dialogueScriptMessages.value = data.dialogueScriptMessages;
+    if (Array.isArray(data.dialogueScriptChatHistory)) dialogueScriptChatHistory.value = data.dialogueScriptChatHistory.map(replacePlaceholderTime);
     if (Array.isArray(data.auditorMessages)) auditorMessages.value = data.auditorMessages;
     if (Array.isArray(data.auditorChatHistory)) auditorChatHistory.value = data.auditorChatHistory.map(replacePlaceholderTime);
     if (Array.isArray(data.readerMessages)) readerMessages.value = data.readerMessages;
@@ -308,7 +330,7 @@ function replacePlaceholderTime(item: ChatHistoryItem): ChatHistoryItem {
 }
 
 watch(
-  [freeChatMessages, freeChatHistory, writerMessages, writerChatHistory, auditorMessages, auditorChatHistory, readerMessages, readerChatHistory, readerRefChat, readerRefWriter],
+  [freeChatMessages, freeChatHistory, writerMessages, writerChatHistory, chapterOutlineMessages, chapterOutlineChatHistory, dialogueScriptMessages, dialogueScriptChatHistory, auditorMessages, auditorChatHistory, readerMessages, readerChatHistory, readerRefChat, readerRefWriter],
   () => {
     saveChatData();
   },
@@ -337,61 +359,104 @@ function handleDocumentClick(e: MouseEvent) {
 onMounted(() => {
   loadChatData();
   document.addEventListener("click", handleDocumentClick);
+  bindTabsBarOverflowObserver();
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("click", handleDocumentClick);
+  unbindTabsBarOverflowObserver();
 });
 
 /* --- Active Computed Properties --- */
+
+/** 各页签的消息列表 / 历史 / 输入草稿，集中一处，新增页签只改这里。 */
+function messagesForTab(tab: SidebarTab): ChatMessage[] {
+  switch (tab) {
+    case "chat":
+      return freeChatMessages.value;
+    case "writer":
+      return writerMessages.value;
+    case "chapter_outline":
+      return chapterOutlineMessages.value;
+    case "dialogue_script":
+      return dialogueScriptMessages.value;
+    case "auditor":
+      return auditorMessages.value;
+    default:
+      return readerMessages.value;
+  }
+}
+
+function historyForTab(tab: SidebarTab): ChatHistoryItem[] {
+  switch (tab) {
+    case "chat":
+      return freeChatHistory.value;
+    case "writer":
+      return writerChatHistory.value;
+    case "chapter_outline":
+      return chapterOutlineChatHistory.value;
+    case "dialogue_script":
+      return dialogueScriptChatHistory.value;
+    case "auditor":
+      return auditorChatHistory.value;
+    default:
+      return readerChatHistory.value;
+  }
+}
+
 const currentMessages = computed({
-  get: () => {
-    if (activeSidebarTab.value === "chat") return freeChatMessages.value;
-    if (activeSidebarTab.value === "writer") return writerMessages.value;
-    if (activeSidebarTab.value === "auditor") return auditorMessages.value;
-    return readerMessages.value;
-  },
+  get: () => messagesForTab(activeSidebarTab.value),
   set: (val) => {
-    if (activeSidebarTab.value === "chat") freeChatMessages.value = val;
-    else if (activeSidebarTab.value === "writer") writerMessages.value = val;
-    else if (activeSidebarTab.value === "auditor") auditorMessages.value = val;
+    const tab = activeSidebarTab.value;
+    if (tab === "chat") freeChatMessages.value = val;
+    else if (tab === "writer") writerMessages.value = val;
+    else if (tab === "chapter_outline") chapterOutlineMessages.value = val;
+    else if (tab === "dialogue_script") dialogueScriptMessages.value = val;
+    else if (tab === "auditor") auditorMessages.value = val;
     else readerMessages.value = val;
   },
 });
 
-const currentChatHistory = computed(() => {
-  if (activeSidebarTab.value === "chat") return freeChatHistory.value;
-  if (activeSidebarTab.value === "writer") return writerChatHistory.value;
-  if (activeSidebarTab.value === "auditor") return auditorChatHistory.value;
-  return readerChatHistory.value;
-});
+const currentChatHistory = computed(() => historyForTab(activeSidebarTab.value));
 
 const currentActiveHistoryId = computed({
   get: () => {
-    if (activeSidebarTab.value === "chat") return activeFreeChatHistoryId.value;
-    if (activeSidebarTab.value === "writer") return activeWriterHistoryId.value;
-    if (activeSidebarTab.value === "auditor") return activeAuditorHistoryId.value;
+    const tab = activeSidebarTab.value;
+    if (tab === "chat") return activeFreeChatHistoryId.value;
+    if (tab === "writer") return activeWriterHistoryId.value;
+    if (tab === "chapter_outline") return activeChapterOutlineHistoryId.value;
+    if (tab === "dialogue_script") return activeDialogueScriptHistoryId.value;
+    if (tab === "auditor") return activeAuditorHistoryId.value;
     return activeReaderHistoryId.value;
   },
   set: (val) => {
-    if (activeSidebarTab.value === "chat") activeFreeChatHistoryId.value = val;
-    else if (activeSidebarTab.value === "writer") activeWriterHistoryId.value = val;
-    else if (activeSidebarTab.value === "auditor") activeAuditorHistoryId.value = val;
+    const tab = activeSidebarTab.value;
+    if (tab === "chat") activeFreeChatHistoryId.value = val;
+    else if (tab === "writer") activeWriterHistoryId.value = val;
+    else if (tab === "chapter_outline") activeChapterOutlineHistoryId.value = val;
+    else if (tab === "dialogue_script") activeDialogueScriptHistoryId.value = val;
+    else if (tab === "auditor") activeAuditorHistoryId.value = val;
     else activeReaderHistoryId.value = val;
   },
 });
 
 const currentComposerText = computed({
   get: () => {
-    if (activeSidebarTab.value === "chat") return freeChatComposerText.value;
-    if (activeSidebarTab.value === "writer") return writerComposerText.value;
-    if (activeSidebarTab.value === "auditor") return auditorComposerText.value;
+    const tab = activeSidebarTab.value;
+    if (tab === "chat") return freeChatComposerText.value;
+    if (tab === "writer") return writerComposerText.value;
+    if (tab === "chapter_outline") return chapterOutlineComposerText.value;
+    if (tab === "dialogue_script") return dialogueScriptComposerText.value;
+    if (tab === "auditor") return auditorComposerText.value;
     return readerComposerText.value;
   },
   set: (val) => {
-    if (activeSidebarTab.value === "chat") freeChatComposerText.value = val;
-    else if (activeSidebarTab.value === "writer") writerComposerText.value = val;
-    else if (activeSidebarTab.value === "auditor") auditorComposerText.value = val;
+    const tab = activeSidebarTab.value;
+    if (tab === "chat") freeChatComposerText.value = val;
+    else if (tab === "writer") writerComposerText.value = val;
+    else if (tab === "chapter_outline") chapterOutlineComposerText.value = val;
+    else if (tab === "dialogue_script") dialogueScriptComposerText.value = val;
+    else if (tab === "auditor") auditorComposerText.value = val;
     else readerComposerText.value = val;
   },
 });
@@ -442,6 +507,10 @@ const composerPlaceholder = computed(() => {
   if (activeSidebarTab.value !== "chat") {
     if (activeSidebarTab.value === "writer")
       return "给 AI 写手发送消息... (Ctrl+Enter 发送)";
+    if (activeSidebarTab.value === "chapter_outline")
+      return "输入大纲、构思或灵感，让代笔人规划章节细纲... (Ctrl+Enter 发送)";
+    if (activeSidebarTab.value === "dialogue_script")
+      return "粘贴细纲或文档内容，生成剧本式对话话本... (Ctrl+Enter 发送)";
     if (activeSidebarTab.value === "auditor")
       return "粘贴完成的草稿给审核员评估... (Ctrl+Enter 发送)";
     return "粘贴一段正文，让读者从追书视角点评... (Ctrl+Enter 发送)";
@@ -806,14 +875,15 @@ function cancelMaterialEdit() {
   materialDraftContent.value = "";
 }
 
-/* --- 叙事定制（对话 / AI写作 两个标签页） --- */
+/* --- 叙事定制（对话 / AI写作 / 章节细纲 / 对话话本 四个标签页） --- */
 
-/** 审核意见不接入叙事定制，因此仅 chat / writer 有作用域。 */
-const narrativeScope = computed<NarrativeScope | null>(() =>
-  activeSidebarTab.value === "chat" || activeSidebarTab.value === "writer"
-    ? (activeSidebarTab.value as NarrativeScope)
-    : null,
-);
+/** 审核意见 / 读者评估不接入叙事定制；其余创作类页签统一挂到 writer 作用域。 */
+const narrativeScope = computed<NarrativeScope | null>(() => {
+  const tab = activeSidebarTab.value;
+  if (tab === "chat") return "chat";
+  if (tab === "writer" || tab === "chapter_outline" || tab === "dialogue_script") return "writer";
+  return null;
+});
 
 const narrativeOpen = ref(false);
 /** 折叠状态：默认三组都展开，用户可自行收起。 */
@@ -947,6 +1017,8 @@ function removeStoryChip(chip: StoryChip) {
    （只有切换页签让 activeSidebarTab 变化时才会被动刷新一次）。 */
 const isChatSending = ref(false);
 const isWriterSending = ref(false);
+const isChapterOutlineSending = ref(false);
+const isDialogueScriptSending = ref(false);
 const isAuditorSending = ref(false);
 const isReaderSending = ref(false);
 /* 正在进行的 AI 请求，按页签各存一份：各个页签可以同时跑，
@@ -954,14 +1026,19 @@ const isReaderSending = ref(false);
 const activeAbortControllers: Record<SidebarTab, AbortController | null> = {
   chat: null,
   writer: null,
+  chapter_outline: null,
+  dialogue_script: null,
   auditor: null,
   reader: null,
 };
 
 const isSendingCurrent = computed(() => {
-  if (activeSidebarTab.value === "chat") return isChatSending.value;
-  if (activeSidebarTab.value === "writer") return isWriterSending.value;
-  if (activeSidebarTab.value === "auditor") return isAuditorSending.value;
+  const tab = activeSidebarTab.value;
+  if (tab === "chat") return isChatSending.value;
+  if (tab === "writer") return isWriterSending.value;
+  if (tab === "chapter_outline") return isChapterOutlineSending.value;
+  if (tab === "dialogue_script") return isDialogueScriptSending.value;
+  if (tab === "auditor") return isAuditorSending.value;
   return isReaderSending.value;
 });
 
@@ -969,6 +1046,8 @@ const isSendingCurrent = computed(() => {
 function setTabSending(tab: SidebarTab, value: boolean) {
   if (tab === "chat") isChatSending.value = value;
   else if (tab === "writer") isWriterSending.value = value;
+  else if (tab === "chapter_outline") isChapterOutlineSending.value = value;
+  else if (tab === "dialogue_script") isDialogueScriptSending.value = value;
   else if (tab === "auditor") isAuditorSending.value = value;
   else isReaderSending.value = value;
 }
@@ -1012,7 +1091,7 @@ function closeMoreMenu() {
   moreMenuOpen.value = false;
 }
 
-type TabRecordKey = "chat" | "writer" | "auditor" | "reader";
+type TabRecordKey = "chat" | "writer" | "chapter_outline" | "dialogue_script" | "auditor" | "reader";
 
 interface ChatRecordTab {
   tabId: TabRecordKey;
@@ -1024,6 +1103,8 @@ function tabRecords(): ChatRecordTab[] {
   return [
     { tabId: "chat", tabName: "对话", history: freeChatHistory.value },
     { tabId: "writer", tabName: "AI写作", history: writerChatHistory.value },
+    { tabId: "chapter_outline", tabName: "章节细纲", history: chapterOutlineChatHistory.value },
+    { tabId: "dialogue_script", tabName: "对话话本", history: dialogueScriptChatHistory.value },
     { tabId: "auditor", tabName: "审核意见", history: auditorChatHistory.value },
     { tabId: "reader", tabName: "读者评估", history: readerChatHistory.value },
   ];
@@ -1048,6 +1129,8 @@ async function downloadChatRecords() {
 function findTabHistory(id: string): ChatHistoryItem[] | undefined {
   if (id === "chat") return freeChatHistory.value;
   if (id === "writer") return writerChatHistory.value;
+  if (id === "chapter_outline") return chapterOutlineChatHistory.value;
+  if (id === "dialogue_script") return dialogueScriptChatHistory.value;
   if (id === "auditor") return auditorChatHistory.value;
   if (id === "reader") return readerChatHistory.value;
   return undefined;
@@ -1079,6 +1162,8 @@ async function importChatRecords() {
           0,
           ...freeChatHistory.value.map((h) => h.id),
           ...writerChatHistory.value.map((h) => h.id),
+          ...chapterOutlineChatHistory.value.map((h) => h.id),
+          ...dialogueScriptChatHistory.value.map((h) => h.id),
           ...auditorChatHistory.value.map((h) => h.id),
           ...readerChatHistory.value.map((h) => h.id),
         );
@@ -1161,14 +1246,89 @@ const showScrollToBottom = ref(false);
 const tabScrollPositions = reactive<Record<SidebarTab, number>>({
   chat: 0,
   writer: 0,
+  chapter_outline: 0,
+  dialogue_script: 0,
   auditor: 0,
   reader: 0,
 });
 const prevLength = reactive<Record<SidebarTab, number>>({
   chat: 0,
   writer: 0,
+  chapter_outline: 0,
+  dialogue_script: 0,
   auditor: 0,
   reader: 0,
+});
+
+/* 页签栏长按左右拖拽平移：窄面板下 6 个页签会被遮挡，
+   轻点仍是正常切换，长按静置 200ms 才武装拖拽（见 longPressDrag）。 */
+const tabsBarRef = ref<HTMLElement | null>(null);
+const isTabsBarDragging = ref(false);
+const tabsBarCanScrollRight = ref(false);
+
+function syncTabsBarOverflow() {
+  const el = tabsBarRef.value;
+  if (!el) {
+    tabsBarCanScrollRight.value = false;
+    return;
+  }
+  tabsBarCanScrollRight.value = el.scrollWidth - el.scrollLeft - el.clientWidth > 2;
+}
+
+function handleTabsBarScroll() {
+  syncTabsBarOverflow();
+}
+
+function handleTabsBarDragStart(event: MouseEvent) {
+  const el = tabsBarRef.value;
+  if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+
+  const startLeft = el.scrollLeft;
+  const startX = event.clientX;
+  startLongPressDrag({
+    event,
+    ghostLabel: "左右拖拽切换页签",
+    ghostVariant: "row",
+    onStart: () => {
+      isTabsBarDragging.value = true;
+      syncTabsBarOverflow();
+    },
+    onMove: (x) => {
+      el.scrollLeft = startLeft - (x - startX);
+    },
+    onEnd: () => {
+      isTabsBarDragging.value = false;
+    },
+  });
+}
+
+function handleTabsBarWheel(e: WheelEvent) {
+  const el = tabsBarRef.value;
+  if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+  const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+  if (Math.abs(delta) > 0) el.scrollLeft += delta;
+}
+
+let tabsBarResizeObserver: ResizeObserver | null = null;
+
+function bindTabsBarOverflowObserver() {
+  syncTabsBarOverflow();
+  const el = tabsBarRef.value;
+  if (el && typeof ResizeObserver !== "undefined") {
+    tabsBarResizeObserver = new ResizeObserver(syncTabsBarOverflow);
+    tabsBarResizeObserver.observe(el);
+    /* 页签数量 / 文案变化会改变 scrollWidth 而不改变页签栏自身尺寸，同样要重算。 */
+    tabsBarResizeObserver.observe(el.firstElementChild ?? el);
+  }
+}
+
+function unbindTabsBarOverflowObserver() {
+  tabsBarResizeObserver?.disconnect();
+  tabsBarResizeObserver = null;
+}
+
+watch(activeSidebarTab, () => {
+  requestAnimationFrame(syncTabsBarOverflow);
 });
 
 function handleMessagesScroll() {
@@ -1498,6 +1658,10 @@ function applyToCard(message: ChatMessage) {
       ? "自由对话"
       : activeSidebarTab.value === "writer"
       ? "AI写作"
+      : activeSidebarTab.value === "chapter_outline"
+      ? "章节细纲"
+      : activeSidebarTab.value === "dialogue_script"
+      ? "对话话本"
       : activeSidebarTab.value === "auditor"
       ? "审核意见"
       : "读者评估";
@@ -1684,8 +1848,7 @@ function resolveContinuation(
   tab: SidebarTab,
 ): { ctx: ContinuationContext; command: SlashCommand | null } | null {
   if (!isContinueRequest(userText)) return null;
-  const list =
-    tab === "chat" ? freeChatMessages.value : tab === "writer" ? writerMessages.value : tab === "auditor" ? auditorMessages.value : readerMessages.value;
+  const list = messagesForTab(tab);
   const prev = findPrevTurn(list);
   if (!prev) return null;
 
@@ -1741,14 +1904,7 @@ async function streamAiReply(
       : aiSettings.model;
   let systemPrompt = "";
 
-  const targetMessages =
-    tab === "chat"
-      ? freeChatMessages.value
-      : tab === "writer"
-      ? writerMessages.value
-      : tab === "auditor"
-      ? auditorMessages.value
-      : readerMessages.value;
+  const targetMessages = messagesForTab(tab);
 
   /* 「对话」标签页命中的创作指令（/身份模板 之类）。未命中为 null。 */
   let slashHit =
@@ -1770,6 +1926,10 @@ async function streamAiReply(
     systemPrompt = aiSettings.chatPrompt.trim() || CHAT_AGENT_PROMPT;
   } else if (tab === "writer") {
     systemPrompt = aiSettings.writerPrompt.trim() || WRITER_AGENT_PROMPT;
+  } else if (tab === "chapter_outline") {
+    systemPrompt = aiSettings.chapterOutlinePrompt.trim() || CHAPTER_OUTLINE_AGENT_PROMPT;
+  } else if (tab === "dialogue_script") {
+    systemPrompt = DIALOGUE_SCRIPT_AGENT_PROMPT;
   } else if (tab === "auditor") {
     systemPrompt = aiSettings.auditorPrompt.trim() || AUDITOR_AGENT_PROMPT;
   } else {
@@ -1788,7 +1948,7 @@ async function streamAiReply(
   const scope: KnowledgeScope | null =
     tab === "chat"
       ? "chat"
-      : tab === "writer"
+      : tab === "writer" || tab === "chapter_outline" || tab === "dialogue_script"
       ? "writer"
       : tab === "auditor"
       ? "auditor"
@@ -1835,10 +1995,14 @@ async function streamAiReply(
   · 一次检索的关键词不理想时，可换更精准的关键词再调用一次（最多两三次），不要反复空转。`;
   }
 
-  /* 叙事定制：仅「对话 / AI写作」两个标签页；用户未勾选任何项时
-     buildNarrativeDirective 返回空串，此处不做任何注入，流程与原来完全一致。 */
-  if ((tab === "chat" || tab === "writer") && aiSettings.narrativeCraftEnabled) {
-    const narrativeDirective = buildNarrativeDirective(tab);
+  /* 叙事定制：对话 / AI写作 / 章节细纲 / 对话话本 四个标签页；
+     用户未勾选任何项时 buildNarrativeDirective 返回空串，
+     此处不做任何注入，流程与原来完全一致。 */
+  if (
+    (tab === "chat" || tab === "writer" || tab === "chapter_outline" || tab === "dialogue_script") &&
+    aiSettings.narrativeCraftEnabled
+  ) {
+    const narrativeDirective = buildNarrativeDirective(tab === "chat" ? "chat" : "writer");
     if (narrativeDirective) {
       systemPrompt += `\n\n${narrativeDirective}`;
     }
@@ -1872,7 +2036,7 @@ async function streamAiReply(
     systemPrompt += `\n\n【思考等级: ${thinkLabel}】`;
   }
 
-  if (tab === "writer") {
+  if (tab === "writer" || tab === "chapter_outline" || tab === "dialogue_script") {
     const insightCtx = buildRAGInsightContext(userMessage);
     if (insightCtx) {
       systemPrompt = systemPrompt + "\n\n" + insightCtx;
@@ -2110,7 +2274,13 @@ async function streamAiReply(
 
     /* 全局 Token 账本：按当前标签分桶，主页 HUD 读的就是这份数据。 */
     const bucket: TokenCategory =
-      tab === "chat" ? "chat" : tab === "writer" ? "writer" : tab === "auditor" ? "auditor" : "reader";
+      tab === "chat"
+        ? "chat"
+        : tab === "auditor"
+        ? "auditor"
+        : tab === "reader"
+        ? "reader"
+        : "writer";
     recordTokens(bucket, result.tokens);
 
     /* 自动续写的过程提示是临时的，收尾时撤掉，只留真正的工具轨迹。 */
@@ -2219,19 +2389,16 @@ async function sendMessage(overrideText?: string) {
   }
   const attachmentContext = attachmentContextParts.join("\n\n---\n\n");
 
-  const targetList =
-    currentTab === "chat"
-      ? freeChatMessages.value
-      : currentTab === "writer"
-      ? writerMessages.value
-      : currentTab === "auditor"
-      ? auditorMessages.value
-      : readerMessages.value;
+  const targetList = messagesForTab(currentTab);
 
   /* 本轮生效的叙事定制：只作为气泡上的展示胶囊留档，指令本体走系统提示词。 */
   const narrativeMeta =
-    (currentTab === "chat" || currentTab === "writer") && aiSettings.narrativeCraftEnabled
-      ? narrativeChips(currentTab).map((c) => ({ kindLabel: c.kindLabel, name: c.name }))
+    (currentTab === "chat" ||
+      currentTab === "writer" ||
+      currentTab === "chapter_outline" ||
+      currentTab === "dialogue_script") &&
+    aiSettings.narrativeCraftEnabled
+      ? narrativeChips(currentTab === "chat" ? "chat" : "writer").map((c) => ({ kindLabel: c.kindLabel, name: c.name }))
       : [];
 
   /* 故事定制只在「对话」页生效，其余页不留档。 */
@@ -2283,6 +2450,8 @@ async function sendMessage(overrideText?: string) {
       freeChatComposerText.value = "";
       chatSlashCmd.value = null;
     } else if (currentTab === "writer") writerComposerText.value = "";
+    else if (currentTab === "chapter_outline") chapterOutlineComposerText.value = "";
+    else if (currentTab === "dialogue_script") dialogueScriptComposerText.value = "";
     else if (currentTab === "auditor") auditorComposerText.value = "";
     else readerComposerText.value = "";
 
@@ -2680,7 +2849,14 @@ onBeforeUnmount(() => {
         <button class="icon-btn" title="收起侧边栏" @click="$emit('close')">
           <PanelRightClose :size="20" :stroke-width="1.7" />
         </button>
-        <div class="agent-nav-tabs">
+        <div
+          ref="tabsBarRef"
+          class="agent-nav-tabs"
+          :class="{ 'is-dragging': isTabsBarDragging, 'can-scroll-right': tabsBarCanScrollRight }"
+          @mousedown="handleTabsBarDragStart"
+          @wheel="handleTabsBarWheel"
+          @scroll="handleTabsBarScroll"
+        >
           <button
             class="agent-nav-btn"
             :class="{ active: activeSidebarTab === 'chat' }"
@@ -2694,6 +2870,22 @@ onBeforeUnmount(() => {
             @click="activeSidebarTab = 'writer'"
           >
             AI写作
+          </button>
+          <button
+            class="agent-nav-btn"
+            :class="{ active: activeSidebarTab === 'chapter_outline' }"
+            title="按大纲或灵感规划章节细纲"
+            @click="activeSidebarTab = 'chapter_outline'"
+          >
+            章节细纲
+          </button>
+          <button
+            class="agent-nav-btn"
+            :class="{ active: activeSidebarTab === 'dialogue_script' }"
+            title="把细纲或文档内容改写成剧本式对话话本"
+            @click="activeSidebarTab = 'dialogue_script'"
+          >
+            对话话本
           </button>
           <button
             class="agent-nav-btn"
@@ -2744,7 +2936,7 @@ onBeforeUnmount(() => {
             </button>
             <div class="menu-divider"></div>
             <div class="menu-section-title">
-              {{ activeSidebarTab === 'chat' ? '对话历史' : activeSidebarTab === 'writer' ? 'AI写作历史' : activeSidebarTab === 'auditor' ? '审核员历史' : '读者评估历史' }}
+              {{ activeSidebarTab === 'chat' ? '对话历史' : activeSidebarTab === 'writer' ? 'AI写作历史' : activeSidebarTab === 'chapter_outline' ? '章节细纲历史' : activeSidebarTab === 'dialogue_script' ? '对话话本历史' : activeSidebarTab === 'auditor' ? '审核员历史' : '读者评估历史' }}
             </div>
             <div class="history-list">
               <div v-for="item in currentChatHistory" :key="item.id" class="history-item">
@@ -2788,6 +2980,10 @@ onBeforeUnmount(() => {
             ? '轻松与 AI 展开自由对话...'
             : activeSidebarTab === 'writer'
             ? '开始AI写作对话吧'
+            : activeSidebarTab === 'chapter_outline'
+            ? '输入大纲、构思或灵感，让代笔人规划章节细纲'
+            : activeSidebarTab === 'dialogue_script'
+            ? '粘贴细纲或文档内容，生成剧本式对话话本'
             : activeSidebarTab === 'auditor'
             ? '粘贴草稿开始审查评估吧'
             : '粘贴一段正文，或点击上方按钮让读者评估当前文档 / 卡片'
@@ -2863,7 +3059,7 @@ onBeforeUnmount(() => {
 
         <template v-else>
           <div class="message-label">
-            {{ activeSidebarTab === 'chat' ? 'AI 助手' : activeSidebarTab === 'writer' ? WRITER_AGENT_NAME : activeSidebarTab === 'auditor' ? AUDITOR_AGENT_NAME : READER_AGENT_NAME }}
+            {{ activeSidebarTab === 'chat' ? 'AI 助手' : activeSidebarTab === 'writer' ? WRITER_AGENT_NAME : activeSidebarTab === 'chapter_outline' ? CHAPTER_OUTLINE_AGENT_NAME : activeSidebarTab === 'dialogue_script' ? DIALOGUE_SCRIPT_AGENT_NAME : activeSidebarTab === 'auditor' ? AUDITOR_AGENT_NAME : READER_AGENT_NAME }}
           </div>
           <div
             class="assistant-reply-zone"
@@ -3648,6 +3844,8 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .chat-header-right {
@@ -3655,6 +3853,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   position: relative;
+  flex: 0 0 auto;
 }
 
 .agent-nav-tabs {
@@ -3664,6 +3863,26 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   gap: 2px;
   border: 1px solid var(--outline-variant);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  cursor: grab;
+}
+
+.agent-nav-tabs.is-dragging,
+.agent-nav-tabs.is-dragging .agent-nav-btn {
+  cursor: grabbing;
+}
+
+/* 仅当右侧仍有未显示的页签时才在右缘渐隐提示；滚到末尾则渐隐消失。 */
+.agent-nav-tabs.can-scroll-right {
+  mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent 100%);
+}
+
+.agent-nav-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .agent-nav-btn {
@@ -3676,6 +3895,8 @@ onBeforeUnmount(() => {
   border: none;
   cursor: pointer;
   transition: all 0.2s ease;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .agent-nav-btn:hover {

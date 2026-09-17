@@ -74,9 +74,11 @@ export function deleteDocFolder(folderId: string): void {
   documentFilesStore.files = documentFilesStore.files.filter((f) => f.folderId !== folderId);
 }
 
-export function createDocFile(folderId: string | null, title?: string): DocFileItem {
+/** 可选传入 id：供「写作规范」等外部仓库把自己生成的文档 id 带进来，
+    保证同一份文档在两处引用同一个 id。 */
+export function createDocFile(folderId: string | null, title?: string, id?: string): DocFileItem {
   const file: DocFileItem = {
-    id: `file_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    id: id || `file_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     folderId,
     title: title?.trim() || "未命名文档",
     content: "",

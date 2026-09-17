@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
 /**
  * Markdown 所见即所得（WYSIWYG）核心机制
  *
@@ -677,6 +677,7 @@ import {
 } from "../autoPairPunctuation";
 import { aiSettings } from "../settings";
 import { documentFilesStore } from "../documentFilesStore";
+import { matchRuleKeywordRanges } from "../utils/writingRuleMarks";
 import ReadingProgressRing from "./ReadingProgressRing.vue";
 import { RING_SIZE_MAX } from "../readingRingStore";
 import { showToast } from "../insightStore";
@@ -706,6 +707,8 @@ const props = withDefaults(
     dragHover?: boolean;
     /** 查找高亮状态（由上层传入）：查找框开着且有词时，在编辑区内逐处包裹命中。 */
     findHighlight?: { open: boolean; text: string; caseSensitive: boolean; index: number } | null;
+    /** 写作规范命中词条：在编辑区内画出波浪线，悬停时上抛给上层弹提示面板。 */
+    ruleHighlight?: Array<{ name: string; severity: "warn" | "hint"; description?: string }> | null;
   }>(),
   {
     fontSize: 16,
@@ -721,6 +724,7 @@ const props = withDefaults(
     embedded: false,
     dragHover: false,
     findHighlight: null,
+    ruleHighlight: null,
   },
 );
 
@@ -736,6 +740,17 @@ const emit = defineEmits<{
   (e: "contextmenu", payload: { x: number; y: number }): void;
   /** 编辑区滚动（scroll 事件不冒泡，由组件主动转发，供上层跟随重定位选中工具栏）。 */
   (e: "scroll"): void;
+  /** 悬停到写作规范波浪线上：把词条信息与视口坐标上抛；移出时为 null。 */
+  (
+    e: "ruleHover",
+    payload: {
+      name: string;
+      severity: "warn" | "hint";
+      description?: string;
+      x: number;
+      y: number;
+    } | null,
+  ): void;
 }>();
 
 const editorRef = ref<HTMLDivElement | null>(null);
@@ -1133,7 +1148,7 @@ function focusEditor() {
    与 textarea 模式的覆盖层高亮同一套视觉（.find-hit / .find-hit-current），
    但直接作用在编辑区 DOM 上：把 markdown 偏移 [start, end) 映射回块内文本节点，
    切分后包上 <mark>。mark 是透明容器，序列化 / 结构一致性 / 光标偏移均不受影响，
-   关闭查找后由 applyFindHighlight 统一拆掉还原纯净 DOM。 */
+   关闭查找后由 applyMarkHighlights 统一拆掉还原纯净 DOM。 */
 
 /** 在 markdown 文本里找全部命中的起始下标。 */
 function findMatchesIn(md: string, term: string, caseSensitive: boolean): number[] {
@@ -1151,8 +1166,15 @@ function findMatchesIn(md: string, term: string, caseSensitive: boolean): number
   return out;
 }
 
-/** 在单个块内按「可见文本」偏移 [start, end) 切分文本节点并包上 <mark>。 */
-function wrapRawRange(block: HTMLElement, startOffset: number, endOffset: number, cls: string) {
+/** 在单个块内按「可见文本」偏移 [start, end) 切分文本节点并包上 <mark>。
+    data 里的键值会挂成 data-* 属性，供悬停时读取提示面板要展示的文案。 */
+function wrapRawRange(
+  block: HTMLElement,
+  startOffset: number,
+  endOffset: number,
+  cls: string,
+  data?: Record<string, string>,
+) {
   const chunks = collectRawChunks(block);
   if (chunks.length === 0) return;
   let acc = 0;
@@ -1198,6 +1220,14 @@ function wrapRawRange(block: HTMLElement, startOffset: number, endOffset: number
   if (toWrap.length === 0) return;
   const mark = document.createElement("mark");
   mark.className = cls;
+  if (data) {
+    /* HTML 解析器会把属性名统一小写，camelCase 直写会变成 data-rulename，
+       读取端拿 `data-rule-name` 就永远取不到值。这里统一转成 kebab-case。 */
+    for (const [k, v] of Object.entries(data)) {
+      const attrName = `data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
+      mark.setAttribute(attrName, v);
+    }
+  }
   const first = toWrap[0];
   /* 先记下原宿主与「包裹区之后的下一个节点」，再搬节点入 mark，
      最后把 mark 插回原位（first 已被移走，不能再用它当参照）。 */
@@ -1208,18 +1238,92 @@ function wrapRawRange(block: HTMLElement, startOffset: number, endOffset: number
   else parent?.appendChild(mark);
 }
 
-/** 把 markdown 文本偏移 [start, end) 定位到对应块并包裹高亮。 */
-function wrapMarkdownRange(blocks: HTMLElement[], start: number, end: number, cls: string) {
+/** 把 markdown 文本偏移 [start, end) 定位到对应块并包裹高亮。
+    区间可能横跨多块（规范句式允许跨段落命中，与 markdown 覆盖层逐行拆段一致），
+    因此对所有重叠的块都要包裹，而不是命中第一块就返回。 */
+function wrapMarkdownRange(
+  blocks: HTMLElement[],
+  start: number,
+  end: number,
+  cls: string,
+  data?: Record<string, string>,
+) {
   let acc = 0;
   for (const b of blocks) {
     const len = liveNodeRawText(b).length;
-    if (start <= acc + len) {
-      const s = Math.max(start, acc);
-      const e = Math.min(end, acc + len);
-      if (e > s) wrapRawRange(b, s - acc, e - acc, cls);
-      return;
+    const blockStart = acc;
+    const blockEnd = acc + len;
+    if (start < blockEnd && end > blockStart) {
+      const s = Math.max(start, blockStart);
+      const e = Math.min(end, blockEnd);
+      if (e > s) wrapRawRange(b, s - blockStart, e - blockStart, cls, data);
     }
-    acc += len + 1;
+    acc = blockEnd + 1;
+    if (acc >= end) break;
+  }
+}
+
+/** 拆掉旧的写作规范 <mark>，还原 DOM。 */
+function clearRuleMarks(editor: HTMLElement) {
+  editor
+    .querySelectorAll("mark.rule-mark")
+    .forEach((m) => m.replaceWith(...Array.from(m.childNodes)));
+}
+
+/** 写作规范命中：按上层下发的词条名在编辑区真实文本里逐处包裹波浪线标记。
+    与查找高亮分开执行，查找命中会叠在规范标记之上（先规范、后查找）。 */
+function applyRuleHighlight() {
+  const editor = editorRef.value;
+  if (!editor) return;
+  const terms = props.ruleHighlight;
+  if (!terms || terms.length === 0) return;
+
+  const blocks = Array.from(editor.querySelectorAll(":scope > .md-block")) as HTMLElement[];
+  if (blocks.length === 0) return;
+  const docRaw = blocks.map((b) => liveNodeRawText(b)).join("\n");
+
+  for (const term of terms) {
+    if (!term || !term.name) continue;
+    /* 与 markdown 覆盖层 / 弹窗「正文命中 N 次」共用同一套匹配口径：
+       「不仅……而且……」这类含省略号 / 顿号 / 空白的句式在这里同样能跨段命中。 */
+    for (const [start, end] of matchRuleKeywordRanges(docRaw, term.name)) {
+      if (end > docRaw.length) continue;
+      wrapMarkdownRange(blocks, start, end, `rule-mark rule-${term.severity}`, {
+        ruleName: term.name,
+        ruleSeverity: term.severity,
+        ruleDesc: term.description || "",
+      });
+    }
+  }
+}
+
+/* 悬停到规范标记上时把词条信息上抛，由上层统一渲染提示面板。 */
+let lastHoverMark: HTMLElement | null = null;
+
+function emitRuleHoverFromEvent(e: MouseEvent) {
+  const target = e.target as HTMLElement | null;
+  const mark = target?.closest?.("mark.rule-mark") as HTMLElement | null;
+  if (!mark) {
+    if (lastHoverMark) {
+      lastHoverMark = null;
+      emit("ruleHover", null);
+    }
+    return;
+  }
+  lastHoverMark = mark;
+  emit("ruleHover", {
+    name: mark.getAttribute("data-rule-name") || "",
+    severity: (mark.getAttribute("data-rule-severity") === "hint" ? "hint" : "warn"),
+    description: mark.getAttribute("data-rule-desc") || undefined,
+    x: e.clientX,
+    y: e.clientY,
+  });
+}
+
+function onEditorMouseLeaveRules() {
+  if (lastHoverMark) {
+    lastHoverMark = null;
+    emit("ruleHover", null);
   }
 }
 
@@ -1227,10 +1331,13 @@ function wrapMarkdownRange(blocks: HTMLElement[], start: number, end: number, cl
     注意匹配文本必须取编辑区当前 DOM 的原文（块级 liveNodeRawText 拼接），
     而不是 props.modelValue —— 输入回显期间 DOM 可能已先于模型更新，用模型算
     出的偏移会包到错位文本上。 */
-function applyFindHighlight() {
+function applyMarkHighlights() {
   const editor = editorRef.value;
   if (!editor) return;
   editor.querySelectorAll("mark.find-hit").forEach((m) => m.replaceWith(...Array.from(m.childNodes)));
+  clearRuleMarks(editor);
+  applyRuleHighlight();
+
   const st = props.findHighlight;
   if (!st || !st.open || !st.text) return;
   const blocks = Array.from(editor.querySelectorAll(":scope > .md-block")) as HTMLElement[];
@@ -1279,7 +1386,7 @@ function reRenderFocusedBlockAs(block: HTMLElement, raw: string) {
   }
   block.replaceWith(canonBlocks[0]);
   /* 先重放查找高亮再落光标：高亮会切分文本节点，后放光标才能按最终 DOM 定位。 */
-  applyFindHighlight();
+  applyMarkHighlights();
   placeCaretByRawOffset(canonBlocks[0], Math.min(caretOffset, liveNodeRawText(canonBlocks[0]).length));
 }
 
@@ -1389,7 +1496,7 @@ function applyPairResult(block: HTMLElement, result: PairEditResult) {
     last = blocks[k];
   }
   /* 先重放查找高亮再放光标：高亮会切分文本节点，后放才能按最终 DOM 定位。 */
-  applyFindHighlight();
+  applyMarkHighlights();
   const len = liveNodeRawText(first).length;
   selectRawRange(first, Math.max(0, result.selStart), Math.min(result.selEnd, len));
   editor.focus();
@@ -1564,7 +1671,7 @@ function onEnterKey() {
   }
 
   placeCaretAtStart(afterBlock);
-  applyFindHighlight();
+  applyMarkHighlights();
   syncDomToModel();
   updateFocusState();
 }
@@ -1873,7 +1980,7 @@ function insertMarkdownAtCaret(text: string) {
   }
 
   /* 先重放查找高亮再落光标：高亮会切分文本节点，后放才能按最终 DOM 定位。 */
-  applyFindHighlight();
+  applyMarkHighlights();
   placeDocOffsets(blockDocOffset + caretInBlock, blockDocOffset + caretInBlock);
   updateFocusState();
   syncDomToModel();
@@ -1941,7 +2048,7 @@ function replaceFocusedBlockWith(raw: string, selStart: number, selEnd: number, 
   }
   target.replaceWith(blocks[0]);
   /* 先重放查找高亮再设选区：高亮会切分文本节点，后设选区才能按最终 DOM 定位。 */
-  applyFindHighlight();
+  applyMarkHighlights();
   selectRawRange(blocks[0], Math.max(0, selStart), Math.min(selEnd, liveNodeRawText(blocks[0]).length));
   editor.focus();
   syncDomToModel();
@@ -2299,7 +2406,7 @@ function updateFromRing(newText: string) {
   const caret = focused ? docSelectionOffsets() : { start: 0, end: 0 };
   setSpotlightTarget(null);
   el.innerHTML = compileLiveHtml(newText);
-  applyFindHighlight();
+  applyMarkHighlights();
   if (focused) placeDocOffsets(caret.start, caret.end);
   updateFocusState();
 }
@@ -2354,7 +2461,7 @@ watch(
     const caret = focused ? docSelectionOffsets() : { start: 0, end: 0 };
     setSpotlightTarget(null);
     el.innerHTML = compileLiveHtml(newVal);
-    applyFindHighlight();
+    applyMarkHighlights();
     if (focused) placeDocOffsets(caret.start, caret.end);
     updateFocusState();
   },
@@ -2368,7 +2475,7 @@ watch(contentColoringOn, () => {
   const caret = focused ? docSelectionOffsets() : { start: 0, end: 0 };
   setSpotlightTarget(null);
   el.innerHTML = compileLiveHtml(props.modelValue);
-  applyFindHighlight();
+  applyMarkHighlights();
   if (focused) placeDocOffsets(caret.start, caret.end);
   updateFocusState();
 });
@@ -2377,8 +2484,17 @@ watch(contentColoringOn, () => {
 watch(
   () => props.findHighlight,
   () => {
-    applyFindHighlight();
+    applyMarkHighlights();
   },
+);
+
+/** 写作规范变化：同样就地重画波浪线，不重建编辑区 DOM。 */
+watch(
+  () => props.ruleHighlight,
+  () => {
+    applyMarkHighlights();
+  },
+  { deep: true },
 );
 
 /** 聚光灯开关：关闭时清理残留的定位高亮 */
@@ -2404,7 +2520,7 @@ function onWindowResize() {
 onMounted(() => {
   if (editorRef.value) {
     editorRef.value.innerHTML = compileLiveHtml(props.modelValue);
-    applyFindHighlight();
+    applyMarkHighlights();
   }
   document.addEventListener("selectionchange", updateFocusState);
   window.addEventListener("resize", onWindowResize);
@@ -2471,7 +2587,7 @@ function applyMarkdownEdit(next: string, selStart: number, selEnd: number) {
     return;
   }
   editor.innerHTML = compileLiveHtml(next);
-  applyFindHighlight();
+  applyMarkHighlights();
   placeDocOffsets(selStart, selEnd);
   editor.focus();
   updateFocusState();
@@ -2619,7 +2735,7 @@ function deleteRangeByDom(range: Range, caret: number): boolean {
   if (editor.querySelectorAll(":scope > .md-block").length === 0) {
     editor.innerHTML = compileLiveHtml("");
     emit("update:modelValue", "");
-    applyFindHighlight();
+    applyMarkHighlights();
     placeDocOffsets(caret, caret);
     editor.focus();
     updateFocusState();
@@ -2821,6 +2937,9 @@ defineExpose({
           @paste="onPaste"
           @click="updateFocusState"
           @contextmenu="onEditorContextMenu"
+          @mouseover="emitRuleHoverFromEvent"
+          @mousemove="emitRuleHoverFromEvent"
+          @mouseleave="onEditorMouseLeaveRules"
         ></div>
       </div>
     </div>
@@ -3204,8 +3323,44 @@ defineExpose({
   border-radius: 4px;
 }
 
+/* ---------------- 写作规范命中的下划波浪线提示 ----------------
+   视觉与 markdown textarea 覆盖层保持同一套：禁用项红色波浪线，参考项青绿点线。
+   悬停时由上层弹出提示面板，这里只负责画线，不做交互。 */
+
+:deep(mark.rule-mark) {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 2px;
+}
+
+:deep(mark.rule-warn) {
+  text-decoration: underline wavy #e5484d;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
+  background: rgb(229 72 77 / 0.08);
+}
+
+:deep(mark.rule-hint) {
+  text-decoration: underline dotted #0f7a5a;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
+  background: rgb(15 122 90 / 0.07);
+}
+
+/* 查找命中叠在规范波浪线上时，底色让位给查找命中。 */
+:deep(mark.rule-mark.find-hit) {
+  background: rgb(var(--primary-rgb) / 0.26);
+}
+
+:deep(mark.rule-mark.find-hit-current) {
+  background: #fdba2d;
+}
+
 /* ---------------- 查找命中高亮（与 textarea 覆盖层 / 预览区同一套视觉） ----------------
-   由 applyFindHighlight 就地包裹 <mark>，关闭查找后拆掉。 */
+   由 applyMarkHighlights 就地包裹 <mark>，关闭查找后拆掉。 */
 
 :deep(mark.find-hit) {
   background: rgb(var(--primary-rgb) / 0.26);

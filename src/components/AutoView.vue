@@ -117,6 +117,7 @@ import {
 } from "../particleCleanup";
 import { WRITER_AGENT_PROMPT } from "../prompts/writerAgent";
 import { CHAPTER_OUTLINE_AGENT_PROMPT } from "../prompts/chapterOutlineAgent";
+import { DIALOGUE_SCRIPT_INSTRUCTIONS } from "../prompts/dialogueScriptAgent";
 import { AUDITOR_AGENT_PROMPT } from "../prompts/auditorAgent";
 import { READER_AGENT_PROMPT } from "../prompts/readerAgent";
 import { CHAT_AGENT_PROMPT } from "../prompts/chatAgent";
@@ -4639,10 +4640,9 @@ function buildDialogueOnlyPrompt(baseBody?: string): string {
     ? `【参考文档内容】：\n${baseBody}`
     : "";
 
-  return `请参考细纲或文档内容，只写对话框架（像话剧剧本）格式：XX说："..."，YY说："..."
-转场时加简单环境描写
-目标字数：600-1400字对话部分（实际字数要按剧情发展来，非硬性要求）
-注意，避免与前一章节叙事手法上有所雷同，造成结构被判定AI味，要学会多种手法写作，比如倒叙、插叙、白描、蒙太奇等等，自行分配，同时注意运用了知识项文档来符合要求。如已有指定写作手法，优先使用指定的。无需输出任何说明
+  return `请参考细纲或文档内容，按以下要求撰写对话话本。
+
+${DIALOGUE_SCRIPT_INSTRUCTIONS}
 
 ${baseContent}${extraContext}`;
 }

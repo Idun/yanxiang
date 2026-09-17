@@ -102,6 +102,13 @@ import ReadingProgressRing from "./ReadingProgressRing.vue";
 import MarkdownWysiwyg from "./MarkdownWysiwyg.vue";
 import InlineAiEdit from "./InlineAiEdit.vue";
 import RevisionAnnotation from "./RevisionAnnotation.vue";
+import WritingRulesButton from "./WritingRulesButton.vue";
+import { writingRulesStore } from "../utils/writingRulesStore";
+import {
+  collectWritingRuleMarks,
+  ruleHighlightTerms,
+  type WritingRuleMark,
+} from "../utils/writingRuleMarks";
 import {
   clearRevisionLocate,
   composeContent,
@@ -1017,6 +1024,23 @@ function pickReformatWhitespace() {
   reformatWhitespace();
 }
 
+function handleWritingRulesReplace(newContent: string) {
+  if (markdown.value !== newContent) {
+    markdown.value = newContent;
+    nextTick(focusActiveEditor);
+    showToast("已完成替换", "正文已按规则更新", "habit");
+  }
+}
+
+function handleWritingRulesLocate(keyword: string) {
+  findText.value = keyword;
+  findOpen.value = true;
+  nextTick(() => {
+    findInputRef.value?.focus();
+    findInputRef.value?.select();
+  });
+}
+
 /*
  * 随机排版：AI 写出来的正文常常一句一行，版面上像列清单。
  * 这里把相邻的短行随机并成段落，句子本身一个字不改，
@@ -1580,10 +1604,100 @@ const findMarks = computed<EditorMark[]>(() => {
   }));
 });
 
-/** 覆盖层需不需要渲染：有修订着色或查找命中时才铺开。 */
+/** 覆盖层需不需要渲染：有修订着色、写作规范波浪线或查找命中时才铺开。 */
 const editorOverlayActive = computed(
-  () => spotlightEnabled.value || findMarks.value.length > 0 || revisionMarks.value.length > 0,
+  () =>
+    spotlightEnabled.value ||
+    findMarks.value.length > 0 ||
+    revisionMarks.value.length > 0 ||
+    writingRuleEditorMarks.value.length > 0,
 );
+
+/* ---- 写作规范：正文命中区间 → 覆盖层波浪线 ---- */
+
+/** 规范在正文里的命中区间（禁用项红色波浪线，其余青绿点线）。 */
+const writingRuleMarks = computed<WritingRuleMark[]>(() =>
+  collectWritingRuleMarks(markdown.value, writingRulesStore.rules),
+);
+
+const writingRuleEditorMarks = computed<EditorMark[]>(() =>
+  writingRuleMarks.value.map((m) => ({
+    start: m.start,
+    end: m.end,
+    cls: `rule-mark ${m.severity === "warn" ? "rule-warn" : "rule-hint"}`,
+  })),
+);
+
+/** 下发给 WYSIWYG 的词条表（WYSIWYG 自行在 DOM 原文里定位）。 */
+const writingRuleTerms = computed(() => ruleHighlightTerms(writingRulesStore.rules));
+
+/** 悬停在波浪线上时浮出的提示面板内容与位置。 */
+const ruleHint = ref<{
+  name: string;
+  severity: "warn" | "hint";
+  description?: string;
+  x: number;
+  y: number;
+} | null>(null);
+
+const ruleHintStyle = computed(() => {
+  if (!ruleHint.value) return {};
+  const w = 268;
+  const left = Math.max(8, Math.min(ruleHint.value.x + 14, window.innerWidth - w - 12));
+  const top = Math.min(ruleHint.value.y + 18, window.innerHeight - 96);
+  return { left: `${left}px`, top: `${top}px` };
+});
+
+let ruleHoverRaf = 0;
+let ruleHoverX = 0;
+let ruleHoverY = 0;
+
+/** textarea 模式：鼠标位置 → 最近光标位 → 落在哪个规范区间。rAF 节流，
+    避免每次 mousemove 都跑一遍镜像测量。 */
+function onEditorRuleHover(e: MouseEvent) {
+  if (writingRuleMarks.value.length === 0) {
+    if (ruleHint.value) ruleHint.value = null;
+    return;
+  }
+  ruleHoverX = e.clientX;
+  ruleHoverY = e.clientY;
+  if (ruleHoverRaf) return;
+  ruleHoverRaf = window.requestAnimationFrame(() => {
+    ruleHoverRaf = 0;
+    const el = editorRef.value;
+    if (!el) return;
+    const offset = textOffsetFromPoint(el, ruleHoverX, ruleHoverY);
+    const hit = writingRuleMarks.value.find((m) => offset >= m.start && offset <= m.end);
+    if (hit) {
+      ruleHint.value = {
+        name: hit.name,
+        severity: hit.severity,
+        description: hit.description,
+        x: ruleHoverX,
+        y: ruleHoverY,
+      };
+    } else if (ruleHint.value) {
+      ruleHint.value = null;
+    }
+  });
+}
+
+function onEditorRuleLeave() {
+  if (ruleHint.value) ruleHint.value = null;
+}
+
+/** WYSIWYG 模式：由子组件把悬停词条与坐标上抛，这里只做展示。 */
+function onWysiwygRuleHover(
+  payload: {
+    name: string;
+    severity: "warn" | "hint";
+    description?: string;
+    x: number;
+    y: number;
+  } | null,
+) {
+  ruleHint.value = payload;
+}
 
 /**
  * 把若干可能相互重叠的区间渲染成与 textarea 逐字对齐的 HTML。
@@ -1685,7 +1799,7 @@ const highlightedEditorHtml = computed(() => {
       .join("\n");
   }
 
-  const marks = [...revisionMarks.value, ...findMarks.value];
+  const marks = [...revisionMarks.value, ...writingRuleEditorMarks.value, ...findMarks.value];
   if (marks.length === 0) return escapeHtml(text);
 
   const current = findMarks.value[findIndex.value];
@@ -4018,6 +4132,14 @@ onBeforeUnmount(() => {
         <button class="format-btn" title="复制全部内容" @click="copyAll">
           <Copy :size="15" :stroke-width="1.8" />
         </button>
+        <WritingRulesButton
+          :document-content="markdown"
+          :document-title="fileForSlot()?.title || '未命名文档'"
+          :secondary="props.secondary"
+          @replace-content="handleWritingRulesReplace"
+          @locate-in-text="handleWritingRulesLocate"
+          @select-document="onSelectSidebarFile"
+        />
         <button
           ref="formatBtnRef"
           class="format-btn has-menu"
@@ -4521,6 +4643,8 @@ onBeforeUnmount(() => {
           :embedded="props.embedded"
           :drag-hover="docDragHover"
           :find-highlight="findHighlight"
+          :rule-highlight="writingRuleTerms"
+          @ruleHover="onWysiwygRuleHover"
           @toggleZen="handleToggleZen"
           @toggleSpotlight="handleToggleSpotlight"
           @undo="undo"
@@ -4618,6 +4742,8 @@ onBeforeUnmount(() => {
               @beforeinput="onEditorBeforeInput"
               @click="updateCaretPos"
               @input="onEditorInput"
+              @mousemove="onEditorRuleHover"
+              @mouseleave="onEditorRuleLeave"
             ></textarea>
             <!-- 悬浮阅读进度圆环：默认贴编辑框内部右上角，长按环心可拖到任意位置。 -->
             <ReadingProgressRing
@@ -4910,6 +5036,24 @@ onBeforeUnmount(() => {
       >
         <span class="block-drag-ghost-dot"></span>
         <span class="block-drag-ghost-text">{{ docBlockDrag.payload.blockText }}</span>
+      </div>
+    </Teleport>
+
+    <!-- 写作规范波浪线的悬停提示面板：Teleport 到 body，视口坐标定位 -->
+    <Teleport to="body">
+      <div
+        v-if="ruleHint"
+        class="rule-hint-panel"
+        :class="ruleHint.severity"
+        :style="ruleHintStyle"
+      >
+        <div class="rule-hint-head">
+          <span class="rule-hint-name">{{ ruleHint.name }}</span>
+          <span class="rule-hint-tag">{{ ruleHint.severity === "warn" ? "禁用" : "参考" }}</span>
+        </div>
+        <p class="rule-hint-desc">
+          {{ ruleHint.description || (ruleHint.severity === "warn" ? "写作规范中标记为禁用，建议改写。" : "写作规范中的参考条目。") }}
+        </p>
       </div>
     </Teleport>
 
@@ -6446,6 +6590,109 @@ onBeforeUnmount(() => {
   background: rgb(var(--primary-rgb) / 0.1);
   box-shadow: inset 2px 0 0 var(--primary);
 }
+
+/* ---- 写作规范命中的下划波浪线（与 WYSIWYG 同一套视觉） ----
+   覆盖层文字是透明的，真正的字由下方 textarea 呈现，所以这里只画装饰线：
+   text-decoration 的取色不跟随 color，因此透明字上仍能看到完整波浪线。 */
+.editor-highlights :deep(mark.rule-mark) {
+  background: transparent;
+  color: transparent;
+  border-radius: 2px;
+}
+
+.editor-highlights :deep(mark.rule-warn) {
+  text-decoration: underline wavy #e5484d;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
+  background: rgb(229 72 77 / 0.08);
+}
+
+.editor-highlights :deep(mark.rule-hint) {
+  text-decoration: underline dotted #0f7a5a;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
+  background: rgb(15 122 90 / 0.07);
+}
+
+/* ---- 写作规范悬停提示面板 ---- */
+.rule-hint-panel {
+  position: fixed;
+  z-index: 3200;
+  width: 268px;
+  padding: 9px 11px;
+  background: var(--surface-bright, #ffffff);
+  border: 1px solid var(--outline-variant);
+  border-radius: 9px;
+  box-shadow: 0 12px 28px -10px rgb(15 23 42 / 0.3);
+  pointer-events: none;
+  animation: ruleHintIn 0.12s ease-out;
+}
+
+@keyframes ruleHintIn {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.rule-hint-panel.warn {
+  border-color: #f0b4b4;
+  border-left: 3px solid #e5484d;
+}
+
+.rule-hint-panel.hint {
+  border-color: #a7d8c4;
+  border-left: 3px solid #0f7a5a;
+}
+
+.rule-hint-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rule-hint-name {
+  overflow: hidden;
+  color: var(--on-surface);
+  font-size: 12.5px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rule-hint-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.rule-hint-panel.warn .rule-hint-tag {
+  background: #fde8e8;
+  color: #b42318;
+}
+
+.rule-hint-panel.hint .rule-hint-tag {
+  background: #d8f5e8;
+  color: #0f7a5a;
+}
+
+.rule-hint-desc {
+  margin: 5px 0 0;
+  color: var(--on-surface-variant);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* ---- 写作规范命中（覆盖层）结束 ---- */
 
 /* ---- 修订与批注在编辑区的视觉落差 ----
    编辑区始终显示原文，被纳入图层的那段原文带上底色与下划线，一眼能看出
