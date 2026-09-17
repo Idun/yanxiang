@@ -139,6 +139,7 @@ import ReaderResultInline from "./ReaderResultInline.vue";
 import AutoBlankDoc from "./auto-view/AutoBlankDoc.vue";
 import AutoWorkflowBar, { type WorkflowStepId } from "./auto-view/AutoWorkflowBar.vue";
 import AutoStoryStateTracker from "./auto-view/AutoStoryStateTracker.vue";
+import AutoAIAssistPanel, { type AssistActionPayload } from "./auto-view/AutoAIAssistPanel.vue";
 import { storyStateStore } from "./auto-view/storyStateStore";
 import {
   liveHtmlToMarkdown,
@@ -353,6 +354,10 @@ const setupFocus = computed({
   set: (val) => (autoStore.setup.focus = val),
 });
 
+/* 辅助面板设定：贴合人设与严格贴合剧情设定开关 */
+const matchPersona = ref(true);
+const strictPlot = ref(true);
+
 /* 题材 / 整体基调 / 核心冲突 / 侧重重心 / 叙事节奏 的自定义表单项状态 */
 const customSetupActive = ref<Record<string, boolean>>({
   genre: false,
@@ -488,6 +493,12 @@ function buildSetupDirective(): string {
   push("侧重重心", FOCUS_OPTIONS, setupFocus.value);
   push("整体基调", TONE_OPTIONS, setupTone.value);
   push("叙事节奏", PACE_OPTIONS, setupPace.value);
+  if (matchPersona.value) {
+    rows.push("- 人设要求：严格贴合人物性格、语言特色与动机逻辑，杜绝崩人设");
+  }
+  if (strictPlot.value) {
+    rows.push("- 剧情要求：严格贴合已有剧情脉络与世界观设定法则，不违背既定设定");
+  }
   if (rows.length === 0) return "";
   return "【创作设定】\n" + rows.join("\n");
 }
@@ -5068,6 +5079,93 @@ async function startGeneration() {
   }
 }
 
+/** 执行右侧辅助面板中点击的各项辅助生成动作 */
+async function handleAssistAction(payload: AssistActionPayload) {
+  if (isGenerating.value) return;
+
+  const currentContent = aiMessage.value?.content || "";
+  const currentSelection = selectedText.value || "";
+  const targetText = currentSelection || currentContent;
+
+  // 1. 续写
+  if (payload.key === "continue_write") {
+    if (aiMessage.value.content && aiMessage.value.content.trim()) {
+      showToast("开始续写", "正在承接正文向下续写约 500 字...", "sparkles");
+      await continueWritingTurn();
+      return;
+    }
+  }
+
+  // 2. 整章修改类 (写开头 / 扩写 / 精简 / 润色 / 改语病 / 调节奏)
+  if (payload.category === "chapter_edit") {
+    if (!targetText.trim() && !topicContent.value.trim()) {
+      showToast("提示", `请先在正文中编写或选中需要【${payload.label}】的段落`, "edit");
+      return;
+    }
+
+    const requirement = payload.prompt;
+    let fullPrompt = "";
+    if (currentSelection) {
+      fullPrompt = `【定向修改指令】：${requirement}\n\n【选中的待处理正文段落】：\n${currentSelection}`;
+    } else if (currentContent) {
+      fullPrompt = `【整章修改指令】：${requirement}\n\n【当前章节原文参考】：\n${currentContent}`;
+    } else {
+      fullPrompt = `【创作指令】：${requirement}\n\n【大纲或灵感参考】：\n${topicContent.value}`;
+    }
+
+    showToast(`开始${payload.label}`, `正在执行【${payload.label}】处理...`, "sparkles");
+    await startGenerationCore("normal", { customPrompt: fullPrompt });
+    return;
+  }
+
+  // 3. 卡文剧情辅助 (剧情推演 / 新增冲突 / 设计伏笔 / 反转 / 章节过渡)
+  if (payload.category === "plot_assist") {
+    const contextBody = currentContent || topicContent.value || "";
+    const fullPrompt = `【卡文剧情辅助 - ${payload.label}】\n${payload.prompt}\n\n【已知情节与正文背景】：\n${contextBody || "请结合已有设定发散构思"}`;
+    showToast(`剧情辅助：${payload.label}`, `正在为剧情生成【${payload.label}】灵感方案...`, "sparkles");
+    await startGenerationCore("normal", { customPrompt: fullPrompt });
+    return;
+  }
+
+  // 4. 设定优化辅助 (人设细化 / 逻辑纠错 / 世界观补全 / BUG 排查)
+  if (payload.category === "setting_assist") {
+    const contextBody = currentContent || topicContent.value || "";
+    const fullPrompt = `【设定优化辅助 - ${payload.label}】\n${payload.prompt}\n\n【当前正文及设定参考】：\n${contextBody || "基于当前创作设定进行专项排查"}`;
+    showToast(`设定优化：${payload.label}`, `正在针对当前内容进行【${payload.label}】...`, "sparkles");
+    await startGenerationCore("normal", { customPrompt: fullPrompt });
+    return;
+  }
+
+  // 5. 素材灵感辅助 (场景 / 心理 / 动作 / 环境 / 台词)
+  if (payload.category === "material_assist") {
+    const contextBody = currentContent || topicContent.value || "";
+    const fullPrompt = `【素材灵感辅助 - ${payload.label}】\n${payload.prompt}\n\n【当前情节场景】：\n${contextBody || "提供富有张力与文学质感的素材片段"}`;
+    showToast(`素材灵感：${payload.label}`, `正在构思【${payload.label}】素材...`, "sparkles");
+    await startGenerationCore("normal", { customPrompt: fullPrompt });
+    return;
+  }
+
+  // 6. AI 检查 (世界观 / 人物设定 / 逻辑与时间线 / 时间地点 / 钩子 / 高潮 / 全面一致性检查)
+  if (payload.category === "ai_inspect") {
+    const contextBody = currentContent || topicContent.value || "";
+    const rules = storyStateStore.ledger.context?.worldRules?.join("；") || "遵循既定世界观法则";
+    const fullPrompt = `【AI 检查 - ${payload.label}】\n${payload.prompt}\n\n【参考世界观法则与约束】：${rules}\n\n【待审查正文与剧情】：\n${contextBody || "请结合当前已有设定进行专项合规排查"}`;
+    showToast(`AI检查：${payload.label}`, `正在执行【${payload.label}】审查...`, "sparkles");
+    await startGenerationCore("normal", { customPrompt: fullPrompt });
+    return;
+  }
+}
+
+/** 执行世界观与既定法则的一致性合规扫描 */
+async function handleWorldviewCheck() {
+  if (isGenerating.value) return;
+  const currentContent = aiMessage.value?.content || "";
+  const rules = storyStateStore.ledger.context.worldRules?.join("；") || "暂无自定义世界观铁律";
+  const fullPrompt = `【AI 检查 - 世界观一致性合规扫描】\n请对当前章节正文与设定进行深度合规扫描：\n1. 检查是否存在前后自相矛盾或违背常识逻辑之处；\n2. 检查是否违背既定世界观法则（参考法则：${rules}）；\n3. 逐条列出合规问题并附带具体修正建议。\n\n【待审查正文】：\n${currentContent || topicContent.value || "请扫描当前设定"}`;
+  showToast("世界观检查", "正在进行世界观与规则一致性排查...", "sparkles");
+  await startGenerationCore("normal", { customPrompt: fullPrompt });
+}
+
 /** 根据当前写作模式解析知识项作用域（对话 / AI写作 / 审核意见 / 读者）。 */
 function resolveKnowledgeScope(): KnowledgeScope | null {
   if (writingMode.value === "chat") return "chat";
@@ -9282,6 +9380,19 @@ function clearOutput() {
             </div>
           </section>
 
+          <!-- 进入正文时（hasOutput || isGenerating）：显示截图中的辅助功能布局组件 -->
+          <AutoAIAssistPanel
+            v-if="hasOutput || isGenerating"
+            :is-generating="isGenerating"
+            :has-text="!!(aiMessage?.content || topicContent)"
+            v-model:match-persona="matchPersona"
+            v-model:strict-plot="strictPlot"
+            @assist-action="handleAssistAction"
+            @check-worldview="handleWorldviewCheck"
+          />
+
+          <!-- 无正文时（创作设定阶段）：呈现目标字数指标与故事/叙事要素定制 -->
+          <template v-else>
           <!-- 3. Metrics Row: 目标字数 + 篇幅 + 输出类型（原正文下拉挪到原模型位置） -->
           <section class="metrics-row">
             <!-- 目标字数 -->
@@ -9705,6 +9816,7 @@ function clearOutput() {
               </div>
             </div>
           </section>
+          </template>
           </template>
 
           <!-- 5. Primary & Secondary Actions -->

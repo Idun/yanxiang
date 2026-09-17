@@ -11,6 +11,7 @@ import {
   Sparkles,
   Square,
 } from "lucide-vue-next";
+import AutoAIAssistPanel, { type AssistActionPayload } from "./AutoAIAssistPanel.vue";
 
 export interface StoryElement {
   id: string;
@@ -55,6 +56,9 @@ interface Props {
   temperature: number;
   topP: number;
   isGenerating: boolean;
+  hasOutput?: boolean;
+  matchPersona?: boolean;
+  strictPlot?: boolean;
   activeGeneratingAction: "normal" | "chapter_outline" | "dialogue_only" | null;
 
   visibleHooks: StoryElement[];
@@ -132,6 +136,10 @@ const emit = defineEmits<{
   (e: "startChapterOutlineGeneration"): void;
   (e: "startDialogueOnlyGeneration"): void;
   (e: "cancelSelections"): void;
+  (e: "assistAction", payload: AssistActionPayload): void;
+  (e: "checkWorldview"): void;
+  (e: "update:matchPersona", val: boolean): void;
+  (e: "update:strictPlot", val: boolean): void;
   (e: "startPanelResize", side: "left" | "right", evt: MouseEvent): void;
   (e: "resetPanelWidth", side: "left" | "right"): void;
 }>();
@@ -272,6 +280,21 @@ function tagTooltip(desc?: string, name?: string): string {
           </div>
         </section>
 
+        <!-- 进入正文时（hasOutput || isGenerating）：显示截图中的辅助功能布局组件 -->
+        <AutoAIAssistPanel
+          v-if="props.hasOutput || props.isGenerating"
+          :is-generating="props.isGenerating"
+          :has-text="!!props.topicContent"
+          :match-persona="props.matchPersona ?? true"
+          :strict-plot="props.strictPlot ?? true"
+          @assist-action="(payload) => emit('assistAction', payload)"
+          @check-worldview="emit('checkWorldview')"
+          @update:match-persona="(val) => emit('update:matchPersona', val)"
+          @update:strict-plot="(val) => emit('update:strictPlot', val)"
+        />
+
+        <!-- 无正文时（创作设定阶段）：呈现写作模式与故事/叙事要素定制 -->
+        <template v-else>
         <!-- 2. Generation Modes -->
         <section class="space-y-1.5 writing-mode-section">
           <label class="block-label">写作模式</label>
@@ -718,6 +741,7 @@ function tagTooltip(desc?: string, name?: string): string {
               </div>
             </div>
           </section>
+        </template>
         </template>
 
         <!-- 5. Primary & Secondary Actions -->
